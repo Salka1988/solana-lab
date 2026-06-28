@@ -1,8 +1,9 @@
+use solana_m0_test_support as test_support;
 use {
     anchor_lang::{
         prelude::Pubkey,
         solana_program::{instruction::Instruction, system_program},
-        AccountDeserialize, InstructionData, ToAccountMetas,
+        InstructionData, ToAccountMetas,
     },
     anchor_spl::token_2022::{
         spl_token_2022::{
@@ -25,7 +26,6 @@ use {
     token_2022_factory::Token2022MintConfig,
 };
 
-const INITIAL_AIRDROP_LAMPORTS: u64 = 1_000_000_000;
 const TOKEN_DECIMALS: u8 = 6;
 const TOKEN_NAME: &str = "Lab Stablecoin";
 const TOKEN_SYMBOL: &str = "LABUSD";
@@ -35,14 +35,10 @@ const MAXIMUM_FEE: u64 = 1_000_000;
 const STANDALONE_TLV_STATE_HEADER_LEN: usize = 8;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let program_id = token_2022_factory::id();
-    let payer = Keypair::new();
-    let mut svm = LiteSVM::new();
+    let (mut svm, payer) = test_support::new_svm_with_payer();
     let bytes = include_bytes!("../../../target/deploy/token_2022_factory.so");
 
-    svm.add_program(program_id, bytes).unwrap();
-    svm.airdrop(&payer.pubkey(), INITIAL_AIRDROP_LAMPORTS)
-        .unwrap();
+    test_support::add_program(&mut svm, token_2022_factory::id(), bytes);
 
     (svm, payer)
 }
@@ -122,9 +118,7 @@ fn send_create_token_2022_mint(
 }
 
 fn read_mint_config(svm: &LiteSVM, mint_config: &Pubkey) -> Token2022MintConfig {
-    let account = svm.get_account(mint_config).expect("mint config exists");
-
-    Token2022MintConfig::try_deserialize(&mut account.data.as_slice()).unwrap()
+    test_support::deserialize_account(svm, mint_config)
 }
 
 #[test]

@@ -25,6 +25,7 @@ anchor-lang = "1.0.2"
 
 [dev-dependencies]
 litesvm = "0.10.0"
+solana_m0_test_support = { path = "../../../test-support" }
 solana-message = "3.0.1"
 solana-transaction = "3.0.2"
 solana-signer = "3.0.0"

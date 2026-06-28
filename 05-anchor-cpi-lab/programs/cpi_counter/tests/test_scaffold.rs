@@ -5,22 +5,14 @@ use {
     },
     litesvm::LiteSVM,
     solana_keypair::Keypair,
-    solana_message::{Message, VersionedMessage},
-    solana_signer::Signer,
-    solana_transaction::versioned::VersionedTransaction,
+    solana_m0_test_support::{add_program, new_svm_with_payer, send_instruction},
 };
 
-const INITIAL_AIRDROP_LAMPORTS: u64 = 1_000_000_000;
-
 fn setup() -> (LiteSVM, Keypair) {
-    let program_id = cpi_counter::id();
-    let payer = Keypair::new();
-    let mut svm = LiteSVM::new();
+    let (mut svm, payer) = new_svm_with_payer();
     let bytes = include_bytes!("../../../target/deploy/cpi_counter.so");
 
-    svm.add_program(program_id, bytes).unwrap();
-    svm.airdrop(&payer.pubkey(), INITIAL_AIRDROP_LAMPORTS)
-        .unwrap();
+    add_program(&mut svm, cpi_counter::id(), bytes);
 
     (svm, payer)
 }
@@ -36,9 +28,6 @@ fn initialize_scaffold_succeeds() {
         }
         .to_account_metas(None),
     );
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[instruction], Some(&payer.pubkey()), &blockhash);
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&payer]).unwrap();
 
-    assert!(svm.send_transaction(tx).is_ok());
+    assert!(send_instruction(&mut svm, &payer, instruction));
 }

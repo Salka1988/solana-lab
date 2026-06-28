@@ -1,3 +1,4 @@
+use solana_m0_test_support as test_support;
 use {
     anchor_lang::{
         prelude::rent,
@@ -12,19 +13,13 @@ use {
     solana_signer::Signer,
     solana_transaction::versioned::VersionedTransaction,
 };
-
-const INITIAL_AIRDROP_LAMPORTS: u64 = 1_000_000_000;
 const REWARD_DECIMALS: u8 = 6;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let program_id = reward_token::id();
-    let payer = Keypair::new();
-    let mut svm = LiteSVM::new();
+    let (mut svm, payer) = test_support::new_svm_with_payer();
     let bytes = include_bytes!("../../../target/deploy/reward_token.so");
 
-    svm.add_program(program_id, bytes).unwrap();
-    svm.airdrop(&payer.pubkey(), INITIAL_AIRDROP_LAMPORTS)
-        .unwrap();
+    test_support::add_program(&mut svm, reward_token::id(), bytes);
 
     (svm, payer)
 }

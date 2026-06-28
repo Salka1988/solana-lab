@@ -1,3 +1,4 @@
+use solana_m0_test_support as test_support;
 use {
     anchor_lang::{
         prelude::{AccountMeta, Pubkey},
@@ -21,7 +22,6 @@ use {
     solana_transaction::versioned::VersionedTransaction,
 };
 
-const INITIAL_AIRDROP_LAMPORTS: u64 = 1_000_000_000;
 const TOKEN_DECIMALS: u8 = 6;
 const TOKEN_NAME: &str = "Lab Stablecoin";
 const TOKEN_SYMBOL: &str = "LABUSD";
@@ -33,14 +33,10 @@ const TRANSFER_AMOUNT: u64 = 100_000_000;
 const EXPECTED_FEE: u64 = 250_000;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let program_id = token_2022_factory::id();
-    let payer = Keypair::new();
-    let mut svm = LiteSVM::new();
+    let (mut svm, payer) = test_support::new_svm_with_payer();
     let bytes = include_bytes!("../../../target/deploy/token_2022_factory.so");
 
-    svm.add_program(program_id, bytes).unwrap();
-    svm.airdrop(&payer.pubkey(), INITIAL_AIRDROP_LAMPORTS)
-        .unwrap();
+    test_support::add_program(&mut svm, token_2022_factory::id(), bytes);
 
     (svm, payer)
 }

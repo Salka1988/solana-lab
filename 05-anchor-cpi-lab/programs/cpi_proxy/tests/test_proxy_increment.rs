@@ -2,34 +2,26 @@ use {
     anchor_lang::{
         prelude::Pubkey,
         solana_program::{instruction::Instruction, system_program},
-        AccountDeserialize, InstructionData, ToAccountMetas,
+        InstructionData, ToAccountMetas,
     },
-    litesvm::{types::FailedTransactionMetadata, LiteSVM},
+    litesvm::LiteSVM,
     solana_keypair::Keypair,
-    solana_message::{Message, VersionedMessage},
+    solana_m0_test_support::{
+        add_program, assert_failure_contains, deserialize_account, fund_user, new_svm_with_payer,
+        send_instruction, send_instruction_result,
+    },
     solana_signer::Signer,
-    solana_transaction::versioned::VersionedTransaction,
 };
 
-const INITIAL_AIRDROP_LAMPORTS: u64 = 1_000_000_000;
-
 fn setup() -> (LiteSVM, Keypair) {
-    let payer = Keypair::new();
-    let mut svm = LiteSVM::new();
+    let (mut svm, payer) = new_svm_with_payer();
     let counter_bytes = include_bytes!("../../../target/deploy/cpi_counter.so");
     let proxy_bytes = include_bytes!("../../../target/deploy/cpi_proxy.so");
 
-    svm.add_program(cpi_counter::id(), counter_bytes).unwrap();
-    svm.add_program(cpi_proxy::id(), proxy_bytes).unwrap();
-    svm.airdrop(&payer.pubkey(), INITIAL_AIRDROP_LAMPORTS)
-        .unwrap();
+    add_program(&mut svm, cpi_counter::id(), counter_bytes);
+    add_program(&mut svm, cpi_proxy::id(), proxy_bytes);
 
     (svm, payer)
-}
-
-fn fund_user(svm: &mut LiteSVM, user: &Keypair) {
-    svm.airdrop(&user.pubkey(), INITIAL_AIRDROP_LAMPORTS)
-        .unwrap();
 }
 
 fn counter_pda(authority: &Pubkey) -> (Pubkey, u8) {
@@ -118,35 +110,8 @@ fn proxy_increment_ix_with_program(
     )
 }
 
-fn send_instruction(svm: &mut LiteSVM, signer: &Keypair, instruction: Instruction) -> bool {
-    send_instruction_result(svm, signer, instruction).is_ok()
-}
-
-fn send_instruction_result(
-    svm: &mut LiteSVM,
-    signer: &Keypair,
-    instruction: Instruction,
-) -> Result<(), FailedTransactionMetadata> {
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[instruction], Some(&signer.pubkey()), &blockhash);
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[signer]).unwrap();
-
-    svm.send_transaction(tx).map(|_| ())
-}
-
-fn assert_failure_contains(failure: &FailedTransactionMetadata, expected: &str) {
-    let failure_text = format!("{:?}\n{}", failure.err, failure.meta.pretty_logs());
-
-    assert!(
-        failure_text.contains(expected),
-        "expected failure to contain `{expected}`\nactual failure:\n{failure_text}"
-    );
-}
-
 fn read_counter(svm: &LiteSVM, counter: &Pubkey) -> cpi_counter::Counter {
-    let account = svm.get_account(counter).expect("counter account exists");
-
-    cpi_counter::Counter::try_deserialize(&mut account.data.as_slice()).unwrap()
+    deserialize_account(svm, counter)
 }
 
 #[test]

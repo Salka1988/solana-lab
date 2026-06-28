@@ -1,3 +1,4 @@
+use solana_m0_test_support as test_support;
 use {
     anchor_lang::{
         prelude::rent,
@@ -15,27 +16,20 @@ use {
     solana_signer::Signer,
     solana_transaction::versioned::VersionedTransaction,
 };
-
-const INITIAL_AIRDROP_LAMPORTS: u64 = 1_000_000_000;
 const REWARD_DECIMALS: u8 = 6;
 const MINT_AMOUNT: u64 = 250_000_000;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let program_id = reward_token::id();
-    let payer = Keypair::new();
-    let mut svm = LiteSVM::new();
+    let (mut svm, payer) = test_support::new_svm_with_payer();
     let bytes = include_bytes!("../../../target/deploy/reward_token.so");
 
-    svm.add_program(program_id, bytes).unwrap();
-    svm.airdrop(&payer.pubkey(), INITIAL_AIRDROP_LAMPORTS)
-        .unwrap();
+    test_support::add_program(&mut svm, reward_token::id(), bytes);
 
     (svm, payer)
 }
 
 fn fund_user(svm: &mut LiteSVM, user: &Keypair) {
-    svm.airdrop(&user.pubkey(), INITIAL_AIRDROP_LAMPORTS)
-        .unwrap();
+    test_support::fund_user(svm, user);
 }
 
 fn reward_mint_config_pda() -> (Pubkey, u8) {
@@ -118,11 +112,7 @@ fn mint_reward_ix(
 }
 
 fn send_instruction(svm: &mut LiteSVM, signer: &Keypair, instruction: Instruction) -> bool {
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[instruction], Some(&signer.pubkey()), &blockhash);
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[signer]).unwrap();
-
-    svm.send_transaction(tx).is_ok()
+    test_support::send_instruction(svm, signer, instruction)
 }
 
 fn send_initialize_reward_mint(
@@ -185,9 +175,7 @@ fn read_token_account(svm: &LiteSVM, token_account: &Pubkey) -> TokenAccount {
 }
 
 fn read_mint(svm: &LiteSVM, mint: &Pubkey) -> Mint {
-    let account = svm.get_account(mint).expect("mint exists");
-
-    Mint::try_deserialize_unchecked(&mut account.data.as_slice()).unwrap()
+    test_support::deserialize_account_unchecked(svm, mint)
 }
 
 #[test]

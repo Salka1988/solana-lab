@@ -2,33 +2,23 @@ use {
     anchor_lang::{
         prelude::Pubkey,
         solana_program::{instruction::Instruction, system_program},
-        AccountDeserialize, InstructionData, ToAccountMetas,
+        InstructionData, ToAccountMetas,
     },
     litesvm::LiteSVM,
     solana_keypair::Keypair,
-    solana_message::{Message, VersionedMessage},
+    solana_m0_test_support::{
+        add_program, deserialize_account, fund_user, new_svm_with_payer, send_instruction,
+    },
     solana_signer::Signer,
-    solana_transaction::versioned::VersionedTransaction,
 };
 
-const INITIAL_AIRDROP_LAMPORTS: u64 = 1_000_000_000;
-
 fn setup() -> (LiteSVM, Keypair) {
-    let program_id = cpi_counter::id();
-    let payer = Keypair::new();
-    let mut svm = LiteSVM::new();
+    let (mut svm, payer) = new_svm_with_payer();
     let bytes = include_bytes!("../../../target/deploy/cpi_counter.so");
 
-    svm.add_program(program_id, bytes).unwrap();
-    svm.airdrop(&payer.pubkey(), INITIAL_AIRDROP_LAMPORTS)
-        .unwrap();
+    add_program(&mut svm, cpi_counter::id(), bytes);
 
     (svm, payer)
-}
-
-fn fund_user(svm: &mut LiteSVM, user: &Keypair) {
-    svm.airdrop(&user.pubkey(), INITIAL_AIRDROP_LAMPORTS)
-        .unwrap();
 }
 
 fn counter_pda(authority: &Pubkey) -> (Pubkey, u8) {
@@ -60,18 +50,8 @@ fn increment_ix(authority: Pubkey, counter: Pubkey) -> Instruction {
     )
 }
 
-fn send_instruction(svm: &mut LiteSVM, signer: &Keypair, instruction: Instruction) -> bool {
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[instruction], Some(&signer.pubkey()), &blockhash);
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[signer]).unwrap();
-
-    svm.send_transaction(tx).is_ok()
-}
-
 fn read_counter(svm: &LiteSVM, counter: &Pubkey) -> cpi_counter::Counter {
-    let account = svm.get_account(counter).expect("counter account exists");
-
-    cpi_counter::Counter::try_deserialize(&mut account.data.as_slice()).unwrap()
+    deserialize_account(svm, counter)
 }
 
 #[test]

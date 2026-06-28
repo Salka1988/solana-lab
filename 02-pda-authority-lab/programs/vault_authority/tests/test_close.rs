@@ -1,3 +1,4 @@
+use solana_m0_test_support as test_support;
 use {
     anchor_lang::{
         prelude::Pubkey,
@@ -6,31 +7,22 @@ use {
     },
     litesvm::LiteSVM,
     solana_keypair::Keypair,
-    solana_message::{Message, VersionedMessage},
     solana_signer::Signer,
-    solana_transaction::versioned::VersionedTransaction,
 };
-
-const INITIAL_AIRDROP_LAMPORTS: u64 = 1_000_000_000;
 const DEFAULT_LIMIT_LAMPORTS: u64 = 500_000_000;
 const DEPOSIT_LAMPORTS: u64 = 125_000_000;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let program_id = vault_authority::id();
-    let payer = Keypair::new();
-    let mut svm = LiteSVM::new();
+    let (mut svm, payer) = test_support::new_svm_with_payer();
     let bytes = include_bytes!("../../../target/deploy/vault_authority.so");
 
-    svm.add_program(program_id, bytes).unwrap();
-    svm.airdrop(&payer.pubkey(), INITIAL_AIRDROP_LAMPORTS)
-        .unwrap();
+    test_support::add_program(&mut svm, vault_authority::id(), bytes);
 
     (svm, payer)
 }
 
 fn fund_user(svm: &mut LiteSVM, user: &Keypair) {
-    svm.airdrop(&user.pubkey(), INITIAL_AIRDROP_LAMPORTS)
-        .unwrap();
+    test_support::fund_user(svm, user);
 }
 
 fn vault_config_pda(user: &Pubkey) -> (Pubkey, u8) {
@@ -75,11 +67,7 @@ fn close_vault_ix(user: Pubkey, vault_config: Pubkey) -> Instruction {
 }
 
 fn send_instruction(svm: &mut LiteSVM, signer: &Keypair, instruction: Instruction) -> bool {
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[instruction], Some(&signer.pubkey()), &blockhash);
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[signer]).unwrap();
-
-    svm.send_transaction(tx).is_ok()
+    test_support::send_instruction(svm, signer, instruction)
 }
 
 #[test]

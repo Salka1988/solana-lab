@@ -25,6 +25,7 @@ anchor-spl = "1.0.2"
 
 [dev-dependencies]
 litesvm = "0.10.0"
+solana_m0_test_support = { path = "../../../test-support" }
 solana-keypair = "3.0.1"
 solana-message = "3.0.1"
 solana-signer = "3.0.0"
