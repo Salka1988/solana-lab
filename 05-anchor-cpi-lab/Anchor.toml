@@ -1,0 +1,19 @@
+[toolchain]
+package_manager = "npm"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+cpi_counter = "HAajVKBhiN8g9UKSro4RdX9cnCV7ZsHs3esHetLAzrAJ"
+cpi_proxy = "6qbLifa2aLfcbmqwypkS7Pcek4NXnMhCGe85gCz3qG6J"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/dev-wallet.json"
+
+[scripts]
+test = "cargo test"
+
+[hooks]
