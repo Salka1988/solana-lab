@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-vault_authority = "66ZVUBF4obHcqm9o7LNtqruF7BaYNFj5PG1zzW4psgsh"
+vault_authority = "21irkKqwRXGWaSMkqL64sVjUbvxYPaGXmkdZX2Wo6xQn"
 
 [provider]
 cluster = "localnet"
