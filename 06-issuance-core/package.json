@@ -1,0 +1,13 @@
+{
+  "name": "06-issuance-core",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "cargo test",
+    "build": "anchor build"
+  },
+  "devDependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "typescript": "^5.9.2"
+  }
+}
