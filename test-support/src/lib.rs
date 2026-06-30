@@ -1,5 +1,9 @@
 use {
     anchor_lang::{prelude::Pubkey, solana_program::instruction::Instruction, AccountDeserialize},
+    anchor_spl::token_2022::spl_token_2022::{
+        extension::StateWithExtensions,
+        state::{Account as TokenAccount, Mint},
+    },
     litesvm::{types::FailedTransactionMetadata, LiteSVM},
     solana_keypair::Keypair,
     solana_message::{Message, VersionedMessage},
@@ -58,8 +62,17 @@ pub fn send_instruction_with_signers_result(
     instruction: Instruction,
     signers: &[&Keypair],
 ) -> Result<(), FailedTransactionMetadata> {
+    send_transaction(svm, fee_payer, vec![instruction], signers)
+}
+
+pub fn send_transaction(
+    svm: &mut LiteSVM,
+    fee_payer: Pubkey,
+    instructions: Vec<Instruction>,
+    signers: &[&Keypair],
+) -> Result<(), FailedTransactionMetadata> {
     let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[instruction], Some(&fee_payer), &blockhash);
+    let msg = Message::new_with_blockhash(&instructions, Some(&fee_payer), &blockhash);
     let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), signers).unwrap();
 
     svm.send_transaction(tx).map(|_| ())
@@ -84,4 +97,18 @@ pub fn deserialize_account_unchecked<T: AccountDeserialize>(svm: &LiteSVM, addre
     let account = svm.get_account(address).expect("account exists");
 
     T::try_deserialize_unchecked(&mut account.data.as_slice()).unwrap()
+}
+
+pub fn token_2022_account_amount(svm: &LiteSVM, token_account: &Pubkey) -> u64 {
+    let account = svm.get_account(token_account).expect("token account exists");
+    let state = StateWithExtensions::<TokenAccount>::unpack(&account.data).unwrap();
+
+    state.base.amount
+}
+
+pub fn token_2022_mint_supply(svm: &LiteSVM, mint: &Pubkey) -> u64 {
+    let account = svm.get_account(mint).expect("mint exists");
+    let state = StateWithExtensions::<Mint>::unpack(&account.data).unwrap();
+
+    state.base.supply
 }

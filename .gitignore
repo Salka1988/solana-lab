@@ -1,8 +1,8 @@
-  .DS_Store
-  target/
-  node_modules/
-  .anchor/
-  test-ledger/
-  .surfpool/
-  Cargo.lock
-  *.log
+.DS_Store
+target/
+node_modules/
+.anchor/
+test-ledger/
+.surfpool/
+Cargo.lock
+*.log

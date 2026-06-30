@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anchor-lang = "=1.0.2"
+anchor-spl = { version = "1.0.2", features = ["token_2022", "token_2022_extensions"] }
 litesvm = "0.10.0"
 solana-keypair = "3.0.1"
 solana-message = "3.0.1"
