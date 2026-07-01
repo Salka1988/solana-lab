@@ -1,0 +1,10 @@
+{
+  "name": "transfer-hook-compliance",
+  "version": "0.1.0",
+  "scripts": {
+    "test": "cargo test"
+  },
+  "devDependencies": {
+    "@coral-xyz/anchor": "^0.32.1"
+  }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "solana_m0_integration_tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anchor-lang = "1.0.2"
+anchor-spl = { version = "1.0.2", features = ["token_2022", "token_2022_extensions"] }
+compliance_hook = { path = "../07-transfer-hook-compliance/programs/compliance_hook" }
+litesvm = "0.10.0"
+solana-keypair = "3.0.1"
+solana-message = "3.0.1"
+solana-signer = "3.0.0"
+solana-transaction = "3.0.2"
+solana_m0_test_support = { path = "../test-support" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+
