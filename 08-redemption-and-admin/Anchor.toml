@@ -1,0 +1,18 @@
+[toolchain]
+package_manager = "npm"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+redemption_admin = "9Nw7daj1a4bqTL5R9qFCCGUnDWEPfk7zhFbu9V26WuCr"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/dev-wallet.json"
+
+[scripts]
+test = "cargo test"
+
+[hooks]

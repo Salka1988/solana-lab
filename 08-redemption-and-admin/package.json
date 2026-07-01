@@ -1,0 +1,7 @@
+{
+  "name": "redemption-and-admin",
+  "version": "0.1.0",
+  "scripts": {
+    "test": "anchor test"
+  }
+}
