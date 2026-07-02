@@ -1,0 +1,22 @@
+{
+  "name": "cu-and-transaction-packing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "build-versioned-tx": "npm run build && node dist/build-versioned-tx.js",
+    "create-alt": "npm run build && node dist/create-alt.js",
+    "measure-cu": "npm run build && node dist/measure-cu.js",
+    "measure-account-size": "npm run build && node dist/measure-account-size.js",
+    "packed-flow-demo": "npm run build && node dist/packed-flow-demo.js",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

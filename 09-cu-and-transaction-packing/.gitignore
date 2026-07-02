@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Node
+/node_modules/
+/dist/
+
+# Logs and generated reports
+*.log
+/reports/generated/
+
+# Local docs
+README.md
+docs/
