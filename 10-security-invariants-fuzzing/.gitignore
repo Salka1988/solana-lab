@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# Rust
+/target/
+Cargo.lock
+
+# Local docs
+README.md
+docs/
