@@ -1,0 +1,8 @@
+{
+  "name": "cross-chain-messaging",
+  "version": "0.1.0",
+  "scripts": {
+    "test": "anchor test",
+    "test:evm": "node evm/test/replay-model.test.mjs"
+  }
+}
