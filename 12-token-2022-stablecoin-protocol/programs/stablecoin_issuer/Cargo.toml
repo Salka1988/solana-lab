@@ -1,0 +1,34 @@
+[package]
+name = "stablecoin_issuer"
+version = "0.1.0"
+description = "Token-2022 stablecoin issuance program"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "stablecoin_issuer"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
+spl-token-metadata-interface = { workspace = true }
+
+[dev-dependencies]
+litesvm = { workspace = true }
+solana-keypair = { workspace = true }
+solana_m0_test_support = { workspace = true }
+solana-signer = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

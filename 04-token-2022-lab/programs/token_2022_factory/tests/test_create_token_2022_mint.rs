@@ -35,12 +35,10 @@ const MAXIMUM_FEE: u64 = 1_000_000;
 const STANDALONE_TLV_STATE_HEADER_LEN: usize = 8;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/token_2022_factory.so");
-
-    test_support::add_program(&mut svm, token_2022_factory::id(), bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        token_2022_factory::id(),
+        include_bytes!("../../../target/deploy/token_2022_factory.so"),
+    )
 }
 
 fn mint_config_pda(mint: Pubkey) -> (Pubkey, u8) {

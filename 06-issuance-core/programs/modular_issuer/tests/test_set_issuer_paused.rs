@@ -14,12 +14,10 @@ const GLOBAL_SUPPLY_CAP: u64 = 1_000_000_000_000;
 const ISSUER_MINT_LIMIT: u64 = 100_000_000;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/modular_issuer.so");
-
-    test_support::add_program(&mut svm, modular_issuer::id(), bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        modular_issuer::id(),
+        include_bytes!("../../../target/deploy/modular_issuer.so"),
+    )
 }
 
 fn protocol_config_pda() -> (Pubkey, u8) {
@@ -198,7 +196,7 @@ fn set_issuer_paused_rejects_non_admin() {
         ),
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "ConstraintHasOne");
+    test_support::assert_result_fails_with(result, "ConstraintHasOne");
 }
 
 #[test]
@@ -225,7 +223,7 @@ fn set_issuer_paused_rejects_wrong_issuer_config_pda() {
         ),
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "ConstraintSeeds");
+    test_support::assert_result_fails_with(result, "ConstraintSeeds");
 }
 
 #[test]
@@ -250,5 +248,5 @@ fn set_issuer_paused_rejects_wrong_issuer_authority() {
         ),
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "ConstraintSeeds");
+    test_support::assert_result_fails_with(result, "ConstraintSeeds");
 }

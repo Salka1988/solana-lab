@@ -1,0 +1,20 @@
+[package]
+name = "protocol_e2e"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
+litesvm = { workspace = true }
+solana-keypair = { workspace = true }
+solana-signer = { workspace = true }
+solana_m0_test_support = { workspace = true }
+spl-transfer-hook-interface = { workspace = true }
+stablecoin_bridge_receiver = { path = "../../programs/stablecoin_bridge_receiver" }
+stablecoin_compliance_hook = { path = "../../programs/stablecoin_compliance_hook" }
+stablecoin_issuer = { path = "../../programs/stablecoin_issuer" }
+stablecoin_redemption = { path = "../../programs/stablecoin_redemption" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

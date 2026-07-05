@@ -21,12 +21,10 @@ const MINT_AMOUNT: u64 = 250_000_000;
 const BURN_AMOUNT: u64 = 100_000_000;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/reward_token.so");
-
-    test_support::add_program(&mut svm, reward_token::id(), bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        reward_token::id(),
+        include_bytes!("../../../target/deploy/reward_token.so"),
+    )
 }
 
 fn fund_user(svm: &mut LiteSVM, user: &Keypair) {

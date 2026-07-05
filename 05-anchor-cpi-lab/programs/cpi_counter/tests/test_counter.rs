@@ -7,18 +7,16 @@ use {
     litesvm::LiteSVM,
     solana_keypair::Keypair,
     solana_m0_test_support::{
-        add_program, deserialize_account, fund_user, new_svm_with_payer, send_instruction,
+        deserialize_account, fund_user, new_svm_with_program, send_instruction,
     },
     solana_signer::Signer,
 };
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/cpi_counter.so");
-
-    add_program(&mut svm, cpi_counter::id(), bytes);
-
-    (svm, payer)
+    new_svm_with_program(
+        cpi_counter::id(),
+        include_bytes!("../../../target/deploy/cpi_counter.so"),
+    )
 }
 
 fn counter_pda(authority: &Pubkey) -> (Pubkey, u8) {

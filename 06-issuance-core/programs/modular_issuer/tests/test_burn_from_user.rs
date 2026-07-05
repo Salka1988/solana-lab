@@ -6,10 +6,7 @@ use {
         InstructionData, ToAccountMetas,
     },
     anchor_spl::token_2022::{
-        spl_token_2022::{
-            extension::StateWithExtensions,
-            state::{Account as TokenAccount, Mint},
-        },
+        spl_token_2022::state::{Account as TokenAccount, Mint},
         ID as TOKEN_2022_PROGRAM_ID,
     },
     litesvm::LiteSVM,
@@ -27,12 +24,10 @@ const TOKEN_SYMBOL: &str = "LABUSD";
 const TOKEN_URI: &str = "https://example.com/lab-usd.json";
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/modular_issuer.so");
-
-    test_support::add_program(&mut svm, modular_issuer::id(), bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        modular_issuer::id(),
+        include_bytes!("../../../target/deploy/modular_issuer.so"),
+    )
 }
 
 fn protocol_config_pda() -> (Pubkey, u8) {
@@ -320,19 +315,11 @@ fn initialize_fixture(svm: &mut LiteSVM, admin: &Keypair) -> BurnFixture {
 }
 
 fn read_token_account(svm: &LiteSVM, token_account: &Pubkey) -> TokenAccount {
-    let account = svm
-        .get_account(token_account)
-        .expect("token account exists");
-    let state = StateWithExtensions::<TokenAccount>::unpack(&account.data).unwrap();
-
-    state.base
+    test_support::token_2022_account(svm, token_account)
 }
 
 fn read_mint(svm: &LiteSVM, mint: &Pubkey) -> Mint {
-    let account = svm.get_account(mint).expect("mint exists");
-    let state = StateWithExtensions::<Mint>::unpack(&account.data).unwrap();
-
-    state.base
+    test_support::token_2022_mint(svm, mint)
 }
 
 #[test]
@@ -403,7 +390,7 @@ fn burn_from_user_rejects_amount_above_tracked_outstanding() {
         &[&fixture.issuer_authority],
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "BurnAmountExceedsOutstanding");
+    test_support::assert_result_fails_with(result, "BurnAmountExceedsOutstanding");
 }
 
 #[test]
@@ -441,7 +428,7 @@ fn burn_from_user_rejects_paused_issuer() {
         &[&fixture.issuer_authority],
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "IssuerPaused");
+    test_support::assert_result_fails_with(result, "IssuerPaused");
 }
 
 #[test]
@@ -470,7 +457,7 @@ fn burn_from_user_rejects_wrong_issuer_signer_for_config() {
         &[&attacker],
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "ConstraintSeeds");
+    test_support::assert_result_fails_with(result, "ConstraintSeeds");
 }
 
 #[test]
@@ -497,7 +484,7 @@ fn burn_from_user_rejects_wrong_mint_authority_pda() {
         &[&fixture.issuer_authority],
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "A raw constraint was violated");
+    test_support::assert_result_fails_with(result, "A raw constraint was violated");
 }
 
 #[test]
@@ -524,5 +511,5 @@ fn burn_from_user_rejects_wrong_mint_account() {
         &[&fixture.issuer_authority],
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "A raw constraint was violated");
+    test_support::assert_result_fails_with(result, "A raw constraint was violated");
 }

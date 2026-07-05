@@ -16,12 +16,10 @@ const PER_MESSAGE_LIMIT: u64 = 1_000;
 const MESSAGE_AMOUNT: u64 = 500;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/mock_bridge_receiver.so");
-
-    test_support::add_program(&mut svm, mock_bridge_receiver::id(), bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        mock_bridge_receiver::id(),
+        include_bytes!("../../../target/deploy/mock_bridge_receiver.so"),
+    )
 }
 
 fn bridge_config_pda(registered_mint: Pubkey) -> (Pubkey, u8) {

@@ -32,12 +32,10 @@ const UPDATED_MAXIMUM_FEE: u64 = 2_000_000;
 const INVALID_TRANSFER_FEE_BASIS_POINTS: u16 = 10_001;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/token_2022_factory.so");
-
-    test_support::add_program(&mut svm, token_2022_factory::id(), bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        token_2022_factory::id(),
+        include_bytes!("../../../target/deploy/token_2022_factory.so"),
+    )
 }
 
 fn mint_config_pda(mint: Pubkey) -> (Pubkey, u8) {

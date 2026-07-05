@@ -30,12 +30,10 @@ const TOKEN_URI: &str = "https://example.com/lab-usd.json";
 const STANDALONE_TLV_STATE_HEADER_LEN: usize = 8;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/modular_issuer.so");
-
-    test_support::add_program(&mut svm, modular_issuer::id(), bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        modular_issuer::id(),
+        include_bytes!("../../../target/deploy/modular_issuer.so"),
+    )
 }
 
 fn protocol_config_pda() -> (Pubkey, u8) {
@@ -241,7 +239,7 @@ fn create_stablecoin_mint_rejects_non_admin() {
         &[&attacker, &mint],
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "ConstraintHasOne");
+    test_support::assert_result_fails_with(result, "ConstraintHasOne");
 }
 
 #[test]
@@ -269,7 +267,7 @@ fn create_stablecoin_mint_rejects_wrong_mint_authority_pda() {
         &[&admin, &mint],
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "ConstraintSeeds");
+    test_support::assert_result_fails_with(result, "ConstraintSeeds");
 }
 
 #[test]
@@ -312,5 +310,5 @@ fn create_stablecoin_mint_rejects_duplicate_global_mint() {
         &[&admin, &second_mint],
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "already in use");
+    test_support::assert_result_fails_with(result, "already in use");
 }

@@ -29,13 +29,10 @@ const MAX_TRANSFER_AMOUNT: u64 = 1_000;
 const DAILY_TRANSFER_LIMIT: u64 = 2_000;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let hook_bytes =
-        include_bytes!("../../07-transfer-hook-compliance/target/deploy/compliance_hook.so");
-
-    test_support::add_program(&mut svm, hook_program::id(), hook_bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        hook_program::id(),
+        include_bytes!("../../07-transfer-hook-compliance/target/deploy/compliance_hook.so"),
+    )
 }
 
 fn compliance_config_pda(mint: Pubkey) -> Pubkey {
@@ -497,7 +494,7 @@ fn blocked_receiver_stops_real_token_2022_transfer_and_keeps_balances() {
         &[&admin, &fixture.alice],
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "DestinationBlocked");
+    test_support::assert_result_fails_with(result, "DestinationBlocked");
     assert_eq!(
         test_support::token_2022_account_amount(&svm, &fixture.alice_token_account.pubkey()),
         INITIAL_BALANCE,
@@ -542,7 +539,7 @@ fn daily_limit_blocks_third_real_token_2022_transfer() {
         &[&admin, &fixture.alice],
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "DailyLimitExceeded");
+    test_support::assert_result_fails_with(result, "DailyLimitExceeded");
     assert_eq!(
         test_support::token_2022_account_amount(&svm, &fixture.alice_token_account.pubkey()),
         INITIAL_BALANCE - 1_500,
@@ -577,7 +574,7 @@ fn paused_hook_stops_real_token_2022_transfer_and_keeps_balances() {
         &[&admin, &fixture.alice],
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "ProtocolPaused");
+    test_support::assert_result_fails_with(result, "ProtocolPaused");
     assert_eq!(
         test_support::token_2022_account_amount(&svm, &fixture.alice_token_account.pubkey()),
         INITIAL_BALANCE,

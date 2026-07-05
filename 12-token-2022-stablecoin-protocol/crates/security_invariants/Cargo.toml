@@ -1,0 +1,10 @@
+[package]
+name = "security_invariants"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

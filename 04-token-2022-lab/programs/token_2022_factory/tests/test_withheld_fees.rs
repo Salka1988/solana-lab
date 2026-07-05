@@ -33,12 +33,10 @@ const TRANSFER_AMOUNT: u64 = 100_000_000;
 const EXPECTED_FEE: u64 = 250_000;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/token_2022_factory.so");
-
-    test_support::add_program(&mut svm, token_2022_factory::id(), bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        token_2022_factory::id(),
+        include_bytes!("../../../target/deploy/token_2022_factory.so"),
+    )
 }
 
 fn mint_config_pda(mint: Pubkey) -> (Pubkey, u8) {

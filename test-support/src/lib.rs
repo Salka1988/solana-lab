@@ -22,6 +22,24 @@ pub fn new_svm_with_payer() -> (LiteSVM, Keypair) {
     (svm, payer)
 }
 
+pub fn new_svm_with_program(program_id: Pubkey, bytes: &[u8]) -> (LiteSVM, Keypair) {
+    let (mut svm, payer) = new_svm_with_payer();
+
+    add_program(&mut svm, program_id, bytes);
+
+    (svm, payer)
+}
+
+pub fn new_svm_with_programs(programs: &[(Pubkey, &[u8])]) -> (LiteSVM, Keypair) {
+    let (mut svm, payer) = new_svm_with_payer();
+
+    for (program_id, bytes) in programs {
+        add_program(&mut svm, *program_id, bytes);
+    }
+
+    (svm, payer)
+}
+
 pub fn add_program(svm: &mut LiteSVM, program_id: Pubkey, bytes: &[u8]) {
     svm.add_program(program_id, bytes).unwrap();
 }
@@ -87,6 +105,21 @@ pub fn assert_failure_contains(failure: &FailedTransactionMetadata, expected: &s
     );
 }
 
+pub fn assert_result_fails_with(result: Result<(), FailedTransactionMetadata>, expected: &str) {
+    let failure = result.expect_err("transaction should fail");
+
+    assert_failure_contains(&failure, expected);
+}
+
+pub fn assert_failure_contains_any(failure: &FailedTransactionMetadata, expected: &[&str]) {
+    let failure_text = format!("{:?}\n{}", failure.err, failure.meta.pretty_logs());
+
+    assert!(
+        expected.iter().any(|item| failure_text.contains(item)),
+        "expected failure to contain one of `{expected:?}`\nactual failure:\n{failure_text}"
+    );
+}
+
 pub fn deserialize_account<T: AccountDeserialize>(svm: &LiteSVM, address: &Pubkey) -> T {
     let account = svm.get_account(address).expect("account exists");
 
@@ -100,15 +133,25 @@ pub fn deserialize_account_unchecked<T: AccountDeserialize>(svm: &LiteSVM, addre
 }
 
 pub fn token_2022_account_amount(svm: &LiteSVM, token_account: &Pubkey) -> u64 {
-    let account = svm.get_account(token_account).expect("token account exists");
-    let state = StateWithExtensions::<TokenAccount>::unpack(&account.data).unwrap();
-
-    state.base.amount
+    token_2022_account(svm, token_account).amount
 }
 
 pub fn token_2022_mint_supply(svm: &LiteSVM, mint: &Pubkey) -> u64 {
+    token_2022_mint(svm, mint).supply
+}
+
+pub fn token_2022_account(svm: &LiteSVM, token_account: &Pubkey) -> TokenAccount {
+    let account = svm
+        .get_account(token_account)
+        .expect("token account exists");
+    let state = StateWithExtensions::<TokenAccount>::unpack(&account.data).unwrap();
+
+    state.base
+}
+
+pub fn token_2022_mint(svm: &LiteSVM, mint: &Pubkey) -> Mint {
     let account = svm.get_account(mint).expect("mint exists");
     let state = StateWithExtensions::<Mint>::unpack(&account.data).unwrap();
 
-    state.base.supply
+    state.base
 }

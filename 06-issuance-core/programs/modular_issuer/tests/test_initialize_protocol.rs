@@ -13,12 +13,10 @@ use {
 const GLOBAL_SUPPLY_CAP: u64 = 1_000_000_000_000;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/modular_issuer.so");
-
-    test_support::add_program(&mut svm, modular_issuer::id(), bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        modular_issuer::id(),
+        include_bytes!("../../../target/deploy/modular_issuer.so"),
+    )
 }
 
 fn protocol_config_pda() -> (Pubkey, u8) {
@@ -94,7 +92,7 @@ fn initialize_protocol_rejects_zero_global_supply_cap() {
         initialize_protocol_ix(admin.pubkey(), protocol_config, 0),
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "InvalidGlobalSupplyCap");
+    test_support::assert_result_fails_with(result, "InvalidGlobalSupplyCap");
 }
 
 #[test]
@@ -108,5 +106,5 @@ fn initialize_protocol_rejects_wrong_pda_substitution() {
         initialize_protocol_ix(admin.pubkey(), wrong_protocol_config, GLOBAL_SUPPLY_CAP),
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "ConstraintSeeds");
+    test_support::assert_result_fails_with(result, "ConstraintSeeds");
 }

@@ -1,0 +1,26 @@
+{
+  "name": "token-2022-stablecoin-protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "anchor build --ignore-keys",
+    "test": "cargo test --tests",
+    "test:tools": "npm run build:tools && node --test tests/*.test.mjs",
+    "test:evm": "node evm/test/replay-model.test.mjs",
+    "build:tools": "tsc",
+    "build-versioned-tx": "npm run build:tools && node dist/build-versioned-tx.js",
+    "create-alt": "npm run build:tools && node dist/create-alt.js",
+    "measure-cu": "npm run build:tools && node dist/measure-cu.js",
+    "measure-account-size": "npm run build:tools && node dist/measure-account-size.js",
+    "packed-flow-demo": "npm run build:tools && node dist/packed-flow-demo.js"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/web3.js": "^1.98.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

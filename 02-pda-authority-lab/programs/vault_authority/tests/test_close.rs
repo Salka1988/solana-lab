@@ -13,12 +13,10 @@ const DEFAULT_LIMIT_LAMPORTS: u64 = 500_000_000;
 const DEPOSIT_LAMPORTS: u64 = 125_000_000;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/vault_authority.so");
-
-    test_support::add_program(&mut svm, vault_authority::id(), bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        vault_authority::id(),
+        include_bytes!("../../../target/deploy/vault_authority.so"),
+    )
 }
 
 fn fund_user(svm: &mut LiteSVM, user: &Keypair) {

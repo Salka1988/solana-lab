@@ -14,13 +14,10 @@ use {
 const REDEMPTION_AMOUNT: u64 = 5_000;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let redemption_bytes =
-        include_bytes!("../../08-redemption-and-admin/target/deploy/redemption_admin.so");
-
-    test_support::add_program(&mut svm, redemption_program::id(), redemption_bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        redemption_program::id(),
+        include_bytes!("../../08-redemption-and-admin/target/deploy/redemption_admin.so"),
+    )
 }
 
 fn protocol_config_pda() -> Pubkey {

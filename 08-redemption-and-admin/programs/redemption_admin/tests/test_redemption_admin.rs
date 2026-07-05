@@ -13,12 +13,10 @@ use {
 const REDEMPTION_AMOUNT: u64 = 1_000;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/redemption_admin.so");
-
-    test_support::add_program(&mut svm, redemption_admin::id(), bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        redemption_admin::id(),
+        include_bytes!("../../../target/deploy/redemption_admin.so"),
+    )
 }
 
 fn protocol_config_pda() -> (Pubkey, u8) {
@@ -347,7 +345,7 @@ fn request_redemption_rejects_zero_amount_and_paused_protocol() {
             0,
         ),
     );
-    test_support::assert_failure_contains(&zero_result.unwrap_err(), "InvalidRedemptionAmount");
+    test_support::assert_result_fails_with(zero_result, "InvalidRedemptionAmount");
 
     let (pause_log, _) = admin_action_log_pda(fixture.protocol_config, 0);
     assert!(test_support::send_instruction(
@@ -372,7 +370,7 @@ fn request_redemption_rejects_zero_amount_and_paused_protocol() {
             REDEMPTION_AMOUNT,
         ),
     );
-    test_support::assert_failure_contains(&paused_result.unwrap_err(), "RedemptionsPaused");
+    test_support::assert_result_fails_with(paused_result, "RedemptionsPaused");
 }
 
 #[test]
@@ -434,7 +432,7 @@ fn cancel_redemption_requires_owner_and_prevents_replay() {
             admin_log,
         ),
     );
-    test_support::assert_failure_contains(&settle_result.unwrap_err(), "RequestNotPending");
+    test_support::assert_result_fails_with(settle_result, "RequestNotPending");
 }
 
 #[test]
@@ -542,7 +540,7 @@ fn admin_actions_reject_non_admin_and_wrong_log_replay() {
             admin_log,
         ),
     );
-    test_support::assert_failure_contains(&attacker_result.unwrap_err(), "UnauthorizedAdmin");
+    test_support::assert_result_fails_with(attacker_result, "UnauthorizedAdmin");
 
     assert!(test_support::send_instruction(
         &mut fixture.svm,
@@ -596,7 +594,7 @@ fn two_step_admin_transfer_requires_pending_admin() {
         &wrong_admin,
         accept_admin_transfer_ix(wrong_admin.pubkey(), fixture.protocol_config, accept_log),
     );
-    test_support::assert_failure_contains(&wrong_result.unwrap_err(), "UnauthorizedPendingAdmin");
+    test_support::assert_result_fails_with(wrong_result, "UnauthorizedPendingAdmin");
 
     assert!(test_support::send_instruction(
         &mut fixture.svm,

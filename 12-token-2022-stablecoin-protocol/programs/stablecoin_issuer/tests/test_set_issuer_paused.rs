@@ -1,0 +1,258 @@
+use solana_m0_test_support as test_support;
+use {
+    anchor_lang::{
+        prelude::Pubkey,
+        solana_program::{instruction::Instruction, system_program},
+        InstructionData, ToAccountMetas,
+    },
+    litesvm::LiteSVM,
+    solana_keypair::Keypair,
+    solana_signer::Signer,
+};
+
+const GLOBAL_SUPPLY_CAP: u64 = 1_000_000_000_000;
+const ISSUER_MINT_LIMIT: u64 = 100_000_000;
+
+fn setup() -> (LiteSVM, Keypair) {
+    test_support::new_svm_with_program(
+        stablecoin_issuer::id(),
+        include_bytes!("../../../target/deploy/stablecoin_issuer.so"),
+    )
+}
+
+fn protocol_config_pda() -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[stablecoin_issuer::PROTOCOL_SEED],
+        &stablecoin_issuer::id(),
+    )
+}
+
+fn issuer_config_pda(issuer_authority: Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[stablecoin_issuer::ISSUER_SEED, issuer_authority.as_ref()],
+        &stablecoin_issuer::id(),
+    )
+}
+
+fn issuer_stats_pda(issuer_authority: Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[
+            stablecoin_issuer::ISSUER_STATS_SEED,
+            issuer_authority.as_ref(),
+        ],
+        &stablecoin_issuer::id(),
+    )
+}
+
+fn initialize_protocol_ix(admin: Pubkey, protocol_config: Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        stablecoin_issuer::id(),
+        &stablecoin_issuer::instruction::InitializeProtocol {
+            global_supply_cap: GLOBAL_SUPPLY_CAP,
+        }
+        .data(),
+        stablecoin_issuer::accounts::InitializeProtocol {
+            admin,
+            protocol_config,
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn register_issuer_ix(
+    admin: Pubkey,
+    protocol_config: Pubkey,
+    issuer_config: Pubkey,
+    issuer_stats: Pubkey,
+    issuer_authority: Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        stablecoin_issuer::id(),
+        &stablecoin_issuer::instruction::RegisterIssuer {
+            mint_limit: ISSUER_MINT_LIMIT,
+        }
+        .data(),
+        stablecoin_issuer::accounts::RegisterIssuer {
+            admin,
+            protocol_config,
+            issuer_config,
+            issuer_stats,
+            issuer_authority,
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn set_issuer_paused_ix(
+    admin: Pubkey,
+    protocol_config: Pubkey,
+    issuer_config: Pubkey,
+    issuer_authority: Pubkey,
+    paused: bool,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        stablecoin_issuer::id(),
+        &stablecoin_issuer::instruction::SetIssuerPaused { paused }.data(),
+        stablecoin_issuer::accounts::SetIssuerPaused {
+            admin,
+            protocol_config,
+            issuer_config,
+            issuer_authority,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn initialize_protocol(svm: &mut LiteSVM, admin: &Keypair, protocol_config: Pubkey) {
+    assert!(test_support::send_instruction(
+        svm,
+        admin,
+        initialize_protocol_ix(admin.pubkey(), protocol_config)
+    ));
+}
+
+fn register_issuer(
+    svm: &mut LiteSVM,
+    admin: &Keypair,
+    protocol_config: Pubkey,
+    issuer_authority: Pubkey,
+) -> Pubkey {
+    let (issuer_config, _) = issuer_config_pda(issuer_authority);
+    let (issuer_stats, _) = issuer_stats_pda(issuer_authority);
+
+    assert!(test_support::send_instruction(
+        svm,
+        admin,
+        register_issuer_ix(
+            admin.pubkey(),
+            protocol_config,
+            issuer_config,
+            issuer_stats,
+            issuer_authority,
+        ),
+    ));
+
+    issuer_config
+}
+
+#[test]
+fn admin_can_pause_and_unpause_issuer() {
+    let (mut svm, admin) = setup();
+    let issuer_authority = Keypair::new().pubkey();
+    let (protocol_config, _) = protocol_config_pda();
+
+    initialize_protocol(&mut svm, &admin, protocol_config);
+    let issuer_config = register_issuer(&mut svm, &admin, protocol_config, issuer_authority);
+
+    assert!(test_support::send_instruction(
+        &mut svm,
+        &admin,
+        set_issuer_paused_ix(
+            admin.pubkey(),
+            protocol_config,
+            issuer_config,
+            issuer_authority,
+            true,
+        ),
+    ));
+
+    let paused_state =
+        test_support::deserialize_account::<stablecoin_issuer::IssuerConfig>(&svm, &issuer_config);
+    assert!(paused_state.paused);
+
+    assert!(test_support::send_instruction(
+        &mut svm,
+        &admin,
+        set_issuer_paused_ix(
+            admin.pubkey(),
+            protocol_config,
+            issuer_config,
+            issuer_authority,
+            false,
+        ),
+    ));
+
+    let unpaused_state =
+        test_support::deserialize_account::<stablecoin_issuer::IssuerConfig>(&svm, &issuer_config);
+    assert!(!unpaused_state.paused);
+}
+
+#[test]
+fn set_issuer_paused_rejects_non_admin() {
+    let (mut svm, admin) = setup();
+    let attacker = Keypair::new();
+    let issuer_authority = Keypair::new().pubkey();
+    let (protocol_config, _) = protocol_config_pda();
+
+    test_support::fund_user(&mut svm, &attacker);
+    initialize_protocol(&mut svm, &admin, protocol_config);
+    let issuer_config = register_issuer(&mut svm, &admin, protocol_config, issuer_authority);
+
+    let result = test_support::send_instruction_result(
+        &mut svm,
+        &attacker,
+        set_issuer_paused_ix(
+            attacker.pubkey(),
+            protocol_config,
+            issuer_config,
+            issuer_authority,
+            true,
+        ),
+    );
+
+    test_support::assert_result_fails_with(result, "ConstraintHasOne");
+}
+
+#[test]
+fn set_issuer_paused_rejects_wrong_issuer_config_pda() {
+    let (mut svm, admin) = setup();
+    let issuer_authority = Keypair::new().pubkey();
+    let other_issuer_authority = Keypair::new().pubkey();
+    let (protocol_config, _) = protocol_config_pda();
+
+    initialize_protocol(&mut svm, &admin, protocol_config);
+    register_issuer(&mut svm, &admin, protocol_config, issuer_authority);
+    let wrong_issuer_config =
+        register_issuer(&mut svm, &admin, protocol_config, other_issuer_authority);
+
+    let result = test_support::send_instruction_result(
+        &mut svm,
+        &admin,
+        set_issuer_paused_ix(
+            admin.pubkey(),
+            protocol_config,
+            wrong_issuer_config,
+            issuer_authority,
+            true,
+        ),
+    );
+
+    test_support::assert_result_fails_with(result, "ConstraintSeeds");
+}
+
+#[test]
+fn set_issuer_paused_rejects_wrong_issuer_authority() {
+    let (mut svm, admin) = setup();
+    let issuer_authority = Keypair::new().pubkey();
+    let wrong_issuer_authority = Keypair::new().pubkey();
+    let (protocol_config, _) = protocol_config_pda();
+
+    initialize_protocol(&mut svm, &admin, protocol_config);
+    let issuer_config = register_issuer(&mut svm, &admin, protocol_config, issuer_authority);
+
+    let result = test_support::send_instruction_result(
+        &mut svm,
+        &admin,
+        set_issuer_paused_ix(
+            admin.pubkey(),
+            protocol_config,
+            issuer_config,
+            wrong_issuer_authority,
+            true,
+        ),
+    );
+
+    test_support::assert_result_fails_with(result, "ConstraintSeeds");
+}

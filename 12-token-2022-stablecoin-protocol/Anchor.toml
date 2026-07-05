@@ -1,0 +1,21 @@
+[toolchain]
+package_manager = "npm"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+stablecoin_issuer = "EjDLnfWS3yJe12vUS63sZCN6HdMzJXJMW7wAHJ6CQ2Ko"
+stablecoin_compliance_hook = "BtG1icm1bAPV13jXtCY6WqScqfts5v5hKSQ1wiZzrDMR"
+stablecoin_redemption = "6mQBt6LvLasizjwWaumru9Upq9w1MXW5YR8yyQtaPgLT"
+stablecoin_bridge_receiver = "3pJy4tmk6J79zK42Ld28QiGvCv1vGomQGN2UxYp6XHFD"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/dev-wallet.json"
+
+[scripts]
+test = "cargo test --tests"
+
+[hooks]

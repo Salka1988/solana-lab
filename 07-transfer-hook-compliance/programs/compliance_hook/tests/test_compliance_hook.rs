@@ -18,12 +18,10 @@ const MAX_TRANSFER_AMOUNT: u64 = 1_000;
 const DAILY_TRANSFER_LIMIT: u64 = 2_000;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/compliance_hook.so");
-
-    test_support::add_program(&mut svm, compliance_hook::id(), bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        compliance_hook::id(),
+        include_bytes!("../../../target/deploy/compliance_hook.so"),
+    )
 }
 
 fn compliance_config_pda(mint: Pubkey) -> (Pubkey, u8) {
@@ -394,7 +392,7 @@ fn execute_rejects_blocked_source() {
         ),
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "SourceBlocked");
+    test_support::assert_result_fails_with(result, "SourceBlocked");
 }
 
 #[test]
@@ -432,7 +430,7 @@ fn execute_rejects_non_allowlisted_destination() {
         ),
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "DestinationNotAllowlisted");
+    test_support::assert_result_fails_with(result, "DestinationNotAllowlisted");
 }
 
 #[test]
@@ -455,7 +453,7 @@ fn execute_rejects_per_transfer_limit() {
         ),
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "TransferLimitExceeded");
+    test_support::assert_result_fails_with(result, "TransferLimitExceeded");
 }
 
 #[test]
@@ -499,7 +497,7 @@ fn execute_rejects_daily_limit() {
         ),
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "DailyLimitExceeded");
+    test_support::assert_result_fails_with(result, "DailyLimitExceeded");
 }
 
 #[test]
@@ -528,7 +526,7 @@ fn execute_rejects_paused_protocol() {
         ),
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "ProtocolPaused");
+    test_support::assert_result_fails_with(result, "ProtocolPaused");
 }
 
 #[test]
@@ -566,7 +564,7 @@ fn execute_rejects_inactive_source_issuer() {
         ),
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "IssuerInactive");
+    test_support::assert_result_fails_with(result, "IssuerInactive");
 }
 
 #[test]
@@ -589,5 +587,5 @@ fn execute_rejects_wrong_extra_account_order() {
         ),
     );
 
-    test_support::assert_failure_contains(&result.unwrap_err(), "InvalidTransferHookAccounts");
+    test_support::assert_result_fails_with(result, "InvalidTransferHookAccounts");
 }

@@ -6,10 +6,7 @@ use {
         InstructionData, ToAccountMetas,
     },
     anchor_spl::token_2022::{
-        spl_token_2022::{
-            extension::StateWithExtensions,
-            state::{Account as TokenAccount, Mint},
-        },
+        spl_token_2022::state::{Account as TokenAccount, Mint},
         ID as TOKEN_2022_PROGRAM_ID,
     },
     litesvm::LiteSVM,
@@ -29,12 +26,10 @@ const MINT_AMOUNT: u64 = 250_000_000;
 const BURN_AMOUNT: u64 = 40_000_000;
 
 fn setup() -> (LiteSVM, Keypair) {
-    let (mut svm, payer) = test_support::new_svm_with_payer();
-    let bytes = include_bytes!("../../../target/deploy/token_2022_factory.so");
-
-    test_support::add_program(&mut svm, token_2022_factory::id(), bytes);
-
-    (svm, payer)
+    test_support::new_svm_with_program(
+        token_2022_factory::id(),
+        include_bytes!("../../../target/deploy/token_2022_factory.so"),
+    )
 }
 
 fn mint_config_pda(mint: Pubkey) -> (Pubkey, u8) {
@@ -194,19 +189,11 @@ fn create_user_token_account(
 }
 
 fn read_token_account(svm: &LiteSVM, token_account: &Pubkey) -> TokenAccount {
-    let account = svm
-        .get_account(token_account)
-        .expect("token account exists");
-    let state = StateWithExtensions::<TokenAccount>::unpack(&account.data).unwrap();
-
-    state.base
+    test_support::token_2022_account(svm, token_account)
 }
 
 fn read_mint(svm: &LiteSVM, mint: &Pubkey) -> Mint {
-    let account = svm.get_account(mint).expect("mint exists");
-    let state = StateWithExtensions::<Mint>::unpack(&account.data).unwrap();
-
-    state.base
+    test_support::token_2022_mint(svm, mint)
 }
 
 #[test]
