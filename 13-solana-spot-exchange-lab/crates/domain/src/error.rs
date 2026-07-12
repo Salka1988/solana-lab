@@ -8,6 +8,8 @@ pub enum Error {
     QuantityNotLotAligned,
     ArithmeticOverflow,
     ArithmeticUnderflow,
+    FillExceedsRemainingQuantity,
+    OrderAlreadyTerminal,
 }
 
 impl fmt::Display for Error {
@@ -21,6 +23,10 @@ impl fmt::Display for Error {
             }
             Self::ArithmeticOverflow => f.write_str("arithmetic overflow"),
             Self::ArithmeticUnderflow => f.write_str("arithmetic underflow"),
+            Self::FillExceedsRemainingQuantity => {
+                f.write_str("fill exceeds remaining order quantity")
+            }
+            Self::OrderAlreadyTerminal => f.write_str("order is already terminal"),
         }
     }
 }
