@@ -28,14 +28,27 @@ impl OrderBookSide {
     }
 
     pub fn insert(&mut self, order: Order) -> Result<(), Error> {
+        self.insert_with(order, VecDeque::push_back)
+    }
+
+    pub(crate) fn reinsert_front(&mut self, order: Order) -> Result<(), Error> {
+        self.insert_with(order, VecDeque::push_front)
+    }
+
+    fn insert_with(
+        &mut self,
+        order: Order,
+        insert: fn(&mut VecDeque<Order>, Order),
+    ) -> Result<(), Error> {
         if order.side() != self.side {
             return Err(Error::WrongOrderSide);
         }
 
-        self.levels
-            .entry(order.price())
-            .or_default()
-            .push_back(order);
+        if order.is_terminal() {
+            return Err(Error::OrderAlreadyTerminal);
+        }
+
+        insert(self.levels.entry(order.price()).or_default(), order);
 
         Ok(())
     }

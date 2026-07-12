@@ -12,6 +12,7 @@ pub enum Error {
     OrderAlreadyTerminal,
     WrongOrderSide,
     OrderNotFound,
+    NoMatchingOrder,
 }
 
 impl fmt::Display for Error {
@@ -31,6 +32,7 @@ impl fmt::Display for Error {
             Self::OrderAlreadyTerminal => f.write_str("order is already terminal"),
             Self::WrongOrderSide => f.write_str("order side does not match book side"),
             Self::OrderNotFound => f.write_str("order not found"),
+            Self::NoMatchingOrder => f.write_str("no matching order"),
         }
     }
 }
