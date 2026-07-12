@@ -1,8 +1,21 @@
 .DS_Store
 target/
 node_modules/
+dist/
 .anchor/
 test-ledger/
 .surfpool/
 Cargo.lock
 *.log
+.idea/
+generated-keypair.json
+
+# Local agent context and learning docs. Do not publish by default.
+AGENTS.md
+PROJECT_CONTEXT.md
+TASKS.md
+DECISIONS.md
+docs/
+*/README.md
+*/PACKAGE.md
+*/docs/
