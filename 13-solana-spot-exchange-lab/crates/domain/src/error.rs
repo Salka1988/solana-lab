@@ -10,6 +10,8 @@ pub enum Error {
     ArithmeticUnderflow,
     FillExceedsRemainingQuantity,
     OrderAlreadyTerminal,
+    WrongOrderSide,
+    OrderNotFound,
 }
 
 impl fmt::Display for Error {
@@ -27,6 +29,8 @@ impl fmt::Display for Error {
                 f.write_str("fill exceeds remaining order quantity")
             }
             Self::OrderAlreadyTerminal => f.write_str("order is already terminal"),
+            Self::WrongOrderSide => f.write_str("order side does not match book side"),
+            Self::OrderNotFound => f.write_str("order not found"),
         }
     }
 }
