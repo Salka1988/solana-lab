@@ -1,4 +1,7 @@
-use crate::{Error, MarketId, OrderId, Price, Quantity, TraderId};
+use crate::{
+    newtype::{non_zero_newtype, zeroable_u64_newtype},
+    Error, MarketId, OrderId, Price, Quantity, TraderId,
+};
 use core::num::NonZeroU64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,37 +18,8 @@ pub enum OrderStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OrderSequence(NonZeroU64);
-
-impl OrderSequence {
-    pub fn new(value: u64) -> Result<Self, Error> {
-        NonZeroU64::new(value).map(Self).ok_or(Error::ZeroValue)
-    }
-
-    pub const fn get(self) -> u64 {
-        self.0.get()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RemainingQuantity(u64);
-
-impl RemainingQuantity {
-    pub const ZERO: Self = Self(0);
-
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-
-    pub const fn is_zero(self) -> bool {
-        self.0 == 0
-    }
-}
+non_zero_newtype!(OrderSequence, u64, NonZeroU64);
+zeroable_u64_newtype!(RemainingQuantity);
 
 impl From<Quantity> for RemainingQuantity {
     fn from(quantity: Quantity) -> Self {

@@ -13,6 +13,9 @@ pub enum Error {
     WrongOrderSide,
     OrderNotFound,
     NoMatchingOrder,
+    AmountConversionOverflow,
+    InsufficientAvailableBalance,
+    InsufficientReservedBalance,
 }
 
 impl fmt::Display for Error {
@@ -33,6 +36,9 @@ impl fmt::Display for Error {
             Self::WrongOrderSide => f.write_str("order side does not match book side"),
             Self::OrderNotFound => f.write_str("order not found"),
             Self::NoMatchingOrder => f.write_str("no matching order"),
+            Self::AmountConversionOverflow => f.write_str("amount conversion overflow"),
+            Self::InsufficientAvailableBalance => f.write_str("insufficient available balance"),
+            Self::InsufficientReservedBalance => f.write_str("insufficient reserved balance"),
         }
     }
 }

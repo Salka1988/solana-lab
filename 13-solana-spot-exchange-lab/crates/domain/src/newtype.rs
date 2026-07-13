@@ -18,3 +18,28 @@ macro_rules! non_zero_newtype {
 }
 
 pub(crate) use non_zero_newtype;
+
+macro_rules! zeroable_u64_newtype {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(u64);
+
+        impl $name {
+            pub const ZERO: Self = Self(0);
+
+            pub const fn new(value: u64) -> Self {
+                Self(value)
+            }
+
+            pub const fn get(self) -> u64 {
+                self.0
+            }
+
+            pub const fn is_zero(self) -> bool {
+                self.0 == 0
+            }
+        }
+    };
+}
+
+pub(crate) use zeroable_u64_newtype;
