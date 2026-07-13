@@ -2,6 +2,9 @@
 members = ["crates/*"]
 resolver = "2"
 
+[workspace.dependencies]
+domain = { path = "crates/domain" }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
