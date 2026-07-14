@@ -4,7 +4,11 @@ use anchor_spl::{
     token_interface::{Mint, TokenAccount},
 };
 
-use crate::{constants::*, error::ErrorCode, state::*};
+use crate::{
+    constants::{MARKET_CONFIG_SEED, TRADER_MARKET_BALANCE_SEED},
+    error::ErrorCode,
+    state::{CustodyAsset, MarketConfig, TraderMarketBalance},
+};
 
 #[derive(Accounts)]
 pub struct Deposit<'info> {
@@ -46,14 +50,14 @@ pub struct Deposit<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn deposit_handler(ctx: Context<Deposit>, asset: DepositAsset, amount: u64) -> Result<()> {
+pub fn deposit_handler(ctx: Context<Deposit>, asset: CustodyAsset, amount: u64) -> Result<()> {
     require!(!ctx.accounts.market_config.paused, ErrorCode::MarketPaused);
     require!(amount > 0, ErrorCode::InvalidDepositAmount);
 
     let market = &ctx.accounts.market_config;
     let (expected_mint, expected_vault) = match asset {
-        DepositAsset::Base => (market.base_mint, market.base_vault),
-        DepositAsset::Quote => (market.quote_mint, market.quote_vault),
+        CustodyAsset::Base => (market.base_mint, market.base_vault),
+        CustodyAsset::Quote => (market.quote_mint, market.quote_vault),
     };
 
     require_keys_eq!(
@@ -109,13 +113,13 @@ pub fn deposit_handler(ctx: Context<Deposit>, asset: DepositAsset, amount: u64) 
     }
 
     match asset {
-        DepositAsset::Base => {
+        CustodyAsset::Base => {
             trader_balance.available_base = trader_balance
                 .available_base
                 .checked_add(amount)
                 .ok_or(ErrorCode::BalanceOverflow)?;
         }
-        DepositAsset::Quote => {
+        CustodyAsset::Quote => {
             trader_balance.available_quote = trader_balance
                 .available_quote
                 .checked_add(amount)

@@ -12,14 +12,22 @@ pub enum ErrorCode {
     MarketPaused,
     #[msg("Deposit amount must be greater than zero")]
     InvalidDepositAmount,
+    #[msg("Withdraw amount must be greater than zero")]
+    InvalidWithdrawAmount,
     #[msg("Invalid deposit mint")]
     InvalidDepositMint,
     #[msg("Invalid deposit source account")]
     InvalidDepositSource,
+    #[msg("Invalid withdraw mint")]
+    InvalidWithdrawMint,
+    #[msg("Invalid withdraw destination account")]
+    InvalidWithdrawDestination,
     #[msg("Invalid market vault")]
     InvalidMarketVault,
     #[msg("Invalid market vault authority")]
     InvalidMarketVaultAuthority,
+    #[msg("Insufficient available balance")]
+    InsufficientAvailableBalance,
     #[msg("Deposit balance overflow")]
     BalanceOverflow,
 }

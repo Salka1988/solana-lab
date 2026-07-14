@@ -1,6 +1,10 @@
 use anchor_lang::prelude::*;
 
-use crate::{constants::*, error::ErrorCode, state::*};
+use crate::{
+    constants::{MARKET_CONFIG_SEED, PROTOCOL_CONFIG_SEED, VAULT_AUTHORITY_SEED},
+    error::ErrorCode,
+    state::{MarketConfig, ProtocolConfig},
+};
 
 #[derive(Accounts)]
 pub struct InitializeProtocol<'info> {

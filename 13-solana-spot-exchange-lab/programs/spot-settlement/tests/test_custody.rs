@@ -124,8 +124,42 @@ struct DepositParams {
     source: Pubkey,
     vault: Pubkey,
     mint: Pubkey,
-    asset: spot_settlement::DepositAsset,
+    asset: spot_settlement::CustodyAsset,
     amount: u64,
+}
+
+struct WithdrawParams {
+    trader: Pubkey,
+    market_config: Pubkey,
+    trader_balance: Pubkey,
+    vault: Pubkey,
+    destination: Pubkey,
+    mint: Pubkey,
+    vault_authority: Pubkey,
+    asset: spot_settlement::CustodyAsset,
+    amount: u64,
+}
+
+fn withdraw_ix(params: WithdrawParams) -> Instruction {
+    Instruction::new_with_bytes(
+        spot_settlement::id(),
+        &spot_settlement::instruction::Withdraw {
+            asset: params.asset,
+            amount: params.amount,
+        }
+        .data(),
+        spot_settlement::accounts::Withdraw {
+            trader: params.trader,
+            market_config: params.market_config,
+            trader_balance: params.trader_balance,
+            vault: params.vault,
+            destination: params.destination,
+            mint: params.mint,
+            vault_authority: params.vault_authority,
+            token_program: TOKEN_2022_PROGRAM_ID,
+        }
+        .to_account_metas(None),
+    )
 }
 
 fn deposit_ix(params: DepositParams) -> Instruction {
@@ -264,6 +298,8 @@ struct TokenFixture {
     base_source: Keypair,
     base_vault: Keypair,
     quote_vault: Keypair,
+    base_destination: Keypair,
+    quote_destination: Keypair,
     market: MarketAccounts,
     trader_balance: Pubkey,
 }
@@ -277,6 +313,8 @@ fn initialized_market_with_token_accounts(svm: &mut LiteSVM, admin: Keypair) -> 
     let base_source = Keypair::new();
     let base_vault = Keypair::new();
     let quote_vault = Keypair::new();
+    let base_destination = Keypair::new();
+    let quote_destination = Keypair::new();
 
     create_mint(svm, &admin, &base_mint, admin.pubkey());
     create_mint(svm, &admin, &quote_mint, admin.pubkey());
@@ -306,6 +344,20 @@ fn initialized_market_with_token_accounts(svm: &mut LiteSVM, admin: Keypair) -> 
         &quote_vault,
         quote_mint.pubkey(),
         vault_authority,
+    );
+    create_token_account(
+        svm,
+        &admin,
+        &base_destination,
+        base_mint.pubkey(),
+        trader.pubkey(),
+    );
+    create_token_account(
+        svm,
+        &admin,
+        &quote_destination,
+        quote_mint.pubkey(),
+        trader.pubkey(),
     );
     mint_to(
         svm,
@@ -344,18 +396,16 @@ fn initialized_market_with_token_accounts(svm: &mut LiteSVM, admin: Keypair) -> 
         base_source,
         base_vault,
         quote_vault,
+        base_destination,
+        quote_destination,
         market,
         trader_balance,
     }
 }
 
-#[test]
-fn base_deposit_moves_tokens_to_vault_and_credits_trader_balance() {
-    let (mut svm, admin) = setup();
-    let fixture = initialized_market_with_token_accounts(&mut svm, admin);
-
+fn deposit_base(svm: &mut LiteSVM, fixture: &TokenFixture, amount: u64) {
     assert!(test_support::send_instruction(
-        &mut svm,
+        svm,
         &fixture.trader,
         deposit_ix(DepositParams {
             trader: fixture.trader.pubkey(),
@@ -364,10 +414,18 @@ fn base_deposit_moves_tokens_to_vault_and_credits_trader_balance() {
             source: fixture.base_source.pubkey(),
             vault: fixture.base_vault.pubkey(),
             mint: fixture.base_mint.pubkey(),
-            asset: spot_settlement::DepositAsset::Base,
-            amount: DEPOSIT_AMOUNT,
+            asset: spot_settlement::CustodyAsset::Base,
+            amount,
         }),
     ));
+}
+
+#[test]
+fn base_deposit_moves_tokens_to_vault_and_credits_trader_balance() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market_with_token_accounts(&mut svm, admin);
+
+    deposit_base(&mut svm, &fixture, DEPOSIT_AMOUNT);
 
     let balance = test_support::deserialize_account::<spot_settlement::TraderMarketBalance>(
         &svm,
@@ -404,7 +462,7 @@ fn deposit_rejects_wrong_vault_for_selected_asset() {
                 source: fixture.base_source.pubkey(),
                 vault: fixture.quote_vault.pubkey(),
                 mint: fixture.base_mint.pubkey(),
-                asset: spot_settlement::DepositAsset::Base,
+                asset: spot_settlement::CustodyAsset::Base,
                 amount: DEPOSIT_AMOUNT,
             }),
         ),
@@ -428,10 +486,126 @@ fn deposit_rejects_zero_amount() {
                 source: fixture.base_source.pubkey(),
                 vault: fixture.base_vault.pubkey(),
                 mint: fixture.base_mint.pubkey(),
-                asset: spot_settlement::DepositAsset::Base,
+                asset: spot_settlement::CustodyAsset::Base,
                 amount: 0,
             }),
         ),
         "Deposit amount must be greater than zero",
+    );
+}
+
+#[test]
+fn base_withdraw_moves_tokens_from_vault_and_debits_trader_balance() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market_with_token_accounts(&mut svm, admin);
+    deposit_base(&mut svm, &fixture, DEPOSIT_AMOUNT);
+
+    assert!(test_support::send_instruction(
+        &mut svm,
+        &fixture.trader,
+        withdraw_ix(WithdrawParams {
+            trader: fixture.trader.pubkey(),
+            market_config: fixture.market.market_config,
+            trader_balance: fixture.trader_balance,
+            vault: fixture.base_vault.pubkey(),
+            destination: fixture.base_destination.pubkey(),
+            mint: fixture.base_mint.pubkey(),
+            vault_authority: fixture.market.vault_authority,
+            asset: spot_settlement::CustodyAsset::Base,
+            amount: DEPOSIT_AMOUNT / 2,
+        }),
+    ));
+
+    let balance = test_support::deserialize_account::<spot_settlement::TraderMarketBalance>(
+        &svm,
+        &fixture.trader_balance,
+    );
+
+    assert_eq!(balance.available_base, DEPOSIT_AMOUNT / 2);
+    assert_eq!(
+        test_support::token_2022_account_amount(&svm, &fixture.base_vault.pubkey()),
+        DEPOSIT_AMOUNT / 2,
+    );
+    assert_eq!(
+        test_support::token_2022_account_amount(&svm, &fixture.base_destination.pubkey()),
+        DEPOSIT_AMOUNT / 2,
+    );
+}
+
+#[test]
+fn withdraw_rejects_insufficient_available_balance() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market_with_token_accounts(&mut svm, admin);
+    deposit_base(&mut svm, &fixture, DEPOSIT_AMOUNT);
+
+    test_support::assert_result_fails_with(
+        test_support::send_instruction_result(
+            &mut svm,
+            &fixture.trader,
+            withdraw_ix(WithdrawParams {
+                trader: fixture.trader.pubkey(),
+                market_config: fixture.market.market_config,
+                trader_balance: fixture.trader_balance,
+                vault: fixture.base_vault.pubkey(),
+                destination: fixture.base_destination.pubkey(),
+                mint: fixture.base_mint.pubkey(),
+                vault_authority: fixture.market.vault_authority,
+                asset: spot_settlement::CustodyAsset::Base,
+                amount: DEPOSIT_AMOUNT + 1,
+            }),
+        ),
+        "Insufficient available balance",
+    );
+}
+
+#[test]
+fn withdraw_rejects_wrong_destination_for_selected_asset() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market_with_token_accounts(&mut svm, admin);
+    deposit_base(&mut svm, &fixture, DEPOSIT_AMOUNT);
+
+    test_support::assert_result_fails_with(
+        test_support::send_instruction_result(
+            &mut svm,
+            &fixture.trader,
+            withdraw_ix(WithdrawParams {
+                trader: fixture.trader.pubkey(),
+                market_config: fixture.market.market_config,
+                trader_balance: fixture.trader_balance,
+                vault: fixture.base_vault.pubkey(),
+                destination: fixture.quote_destination.pubkey(),
+                mint: fixture.base_mint.pubkey(),
+                vault_authority: fixture.market.vault_authority,
+                asset: spot_settlement::CustodyAsset::Base,
+                amount: DEPOSIT_AMOUNT / 2,
+            }),
+        ),
+        "Invalid withdraw destination account",
+    );
+}
+
+#[test]
+fn withdraw_rejects_zero_amount() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market_with_token_accounts(&mut svm, admin);
+    deposit_base(&mut svm, &fixture, DEPOSIT_AMOUNT);
+
+    test_support::assert_result_fails_with(
+        test_support::send_instruction_result(
+            &mut svm,
+            &fixture.trader,
+            withdraw_ix(WithdrawParams {
+                trader: fixture.trader.pubkey(),
+                market_config: fixture.market.market_config,
+                trader_balance: fixture.trader_balance,
+                vault: fixture.base_vault.pubkey(),
+                destination: fixture.base_destination.pubkey(),
+                mint: fixture.base_mint.pubkey(),
+                vault_authority: fixture.market.vault_authority,
+                asset: spot_settlement::CustodyAsset::Base,
+                amount: 0,
+            }),
+        ),
+        "Withdraw amount must be greater than zero",
     );
 }

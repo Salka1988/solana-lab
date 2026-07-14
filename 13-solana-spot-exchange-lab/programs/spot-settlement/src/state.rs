@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DepositAsset {
+pub enum CustodyAsset {
     Base,
     Quote,
 }

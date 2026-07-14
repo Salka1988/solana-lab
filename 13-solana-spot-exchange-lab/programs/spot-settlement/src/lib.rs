@@ -23,7 +23,11 @@ pub mod spot_settlement {
         initialize::initialize_market_handler(ctx)
     }
 
-    pub fn deposit(ctx: Context<Deposit>, asset: DepositAsset, amount: u64) -> Result<()> {
+    pub fn deposit(ctx: Context<Deposit>, asset: CustodyAsset, amount: u64) -> Result<()> {
         deposit::deposit_handler(ctx, asset, amount)
+    }
+
+    pub fn withdraw(ctx: Context<Withdraw>, asset: CustodyAsset, amount: u64) -> Result<()> {
+        withdraw::withdraw_handler(ctx, asset, amount)
     }
 }
