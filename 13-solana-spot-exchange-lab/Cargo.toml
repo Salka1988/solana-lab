@@ -3,7 +3,9 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.dependencies]
+application = { path = "crates/application" }
 domain = { path = "crates/domain" }
+tokio = "1.46.1"
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,322 @@
+#![forbid(unsafe_code)]
+
+use application::{CommandId, ExchangeApplication};
+use domain::{AssetId, BalanceAmount, Fill, MarketSpec, Order, TraderId};
+use tokio::sync::{mpsc, oneshot};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarketSnapshot {
+    pub event_count: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum MarketReply {
+    DepositCredited,
+    OrderPlaced { fills: Vec<Fill> },
+    Snapshot(MarketSnapshot),
+    Shutdown,
+}
+
+#[derive(Debug)]
+pub enum MarketCommand {
+    CreditDeposit {
+        command_id: CommandId,
+        trader_id: TraderId,
+        asset_id: AssetId,
+        amount: BalanceAmount,
+        reply_to: oneshot::Sender<application::Result<MarketReply>>,
+    },
+    PlaceOrder {
+        command_id: CommandId,
+        order: Order,
+        reply_to: oneshot::Sender<application::Result<MarketReply>>,
+    },
+    Snapshot {
+        reply_to: oneshot::Sender<application::Result<MarketReply>>,
+    },
+    Shutdown {
+        reply_to: oneshot::Sender<application::Result<MarketReply>>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketActorHandle {
+    sender: mpsc::Sender<MarketCommand>,
+}
+
+impl MarketActorHandle {
+    pub fn spawn(market: MarketSpec, mailbox_capacity: usize) -> Self {
+        let (sender, receiver) = mpsc::channel(mailbox_capacity);
+        tokio::spawn(run_market_actor(ExchangeApplication::new(market), receiver));
+        Self { sender }
+    }
+
+    pub fn try_send(
+        &self,
+        command: MarketCommand,
+    ) -> Result<(), mpsc::error::TrySendError<MarketCommand>> {
+        self.sender.try_send(command)
+    }
+
+    pub async fn credit_deposit(
+        &self,
+        command_id: CommandId,
+        trader_id: TraderId,
+        asset_id: AssetId,
+        amount: BalanceAmount,
+    ) -> application::Result<MarketReply> {
+        let (reply_to, reply_rx) = oneshot::channel();
+        let command = MarketCommand::CreditDeposit {
+            command_id,
+            trader_id,
+            asset_id,
+            amount,
+            reply_to,
+        };
+        self.sender
+            .send(command)
+            .await
+            .map_err(|_| application::Error::ActorClosed)?;
+        reply_rx
+            .await
+            .map_err(|_| application::Error::ActorClosed)?
+    }
+
+    pub async fn place_order(
+        &self,
+        command_id: CommandId,
+        order: Order,
+    ) -> application::Result<MarketReply> {
+        let (reply_to, reply_rx) = oneshot::channel();
+        let command = MarketCommand::PlaceOrder {
+            command_id,
+            order,
+            reply_to,
+        };
+        self.sender
+            .send(command)
+            .await
+            .map_err(|_| application::Error::ActorClosed)?;
+        reply_rx
+            .await
+            .map_err(|_| application::Error::ActorClosed)?
+    }
+
+    pub async fn snapshot(&self) -> application::Result<MarketReply> {
+        let (reply_to, reply_rx) = oneshot::channel();
+        self.sender
+            .send(MarketCommand::Snapshot { reply_to })
+            .await
+            .map_err(|_| application::Error::ActorClosed)?;
+        reply_rx
+            .await
+            .map_err(|_| application::Error::ActorClosed)?
+    }
+
+    pub async fn shutdown(&self) -> application::Result<MarketReply> {
+        let (reply_to, reply_rx) = oneshot::channel();
+        self.sender
+            .send(MarketCommand::Shutdown { reply_to })
+            .await
+            .map_err(|_| application::Error::ActorClosed)?;
+        reply_rx
+            .await
+            .map_err(|_| application::Error::ActorClosed)?
+    }
+}
+
+async fn run_market_actor(
+    mut app: ExchangeApplication,
+    mut receiver: mpsc::Receiver<MarketCommand>,
+) {
+    while let Some(command) = receiver.recv().await {
+        let should_shutdown = handle_command(&mut app, command);
+        if should_shutdown {
+            break;
+        }
+    }
+}
+
+fn handle_command(app: &mut ExchangeApplication, command: MarketCommand) -> bool {
+    match command {
+        MarketCommand::CreditDeposit {
+            command_id,
+            trader_id,
+            asset_id,
+            amount,
+            reply_to,
+        } => {
+            let reply = app
+                .credit_deposit(command_id, trader_id, asset_id, amount)
+                .map(|()| MarketReply::DepositCredited);
+            let _ = reply_to.send(reply);
+            false
+        }
+        MarketCommand::PlaceOrder {
+            command_id,
+            order,
+            reply_to,
+        } => {
+            let reply = app
+                .place_order(command_id, order)
+                .map(|fills| MarketReply::OrderPlaced { fills });
+            let _ = reply_to.send(reply);
+            false
+        }
+        MarketCommand::Snapshot { reply_to } => {
+            let reply = Ok(MarketReply::Snapshot(MarketSnapshot {
+                event_count: app.events().len(),
+            }));
+            let _ = reply_to.send(reply);
+            false
+        }
+        MarketCommand::Shutdown { reply_to } => {
+            let _ = reply_to.send(Ok(MarketReply::Shutdown));
+            true
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use domain::{LotSize, MarketId, OrderId, OrderSequence, Price, Quantity, Side, TickSize};
+
+    fn command(id: u128) -> CommandId {
+        CommandId::new(id).unwrap()
+    }
+
+    fn base_asset() -> AssetId {
+        AssetId::new(10).unwrap()
+    }
+
+    fn quote_asset() -> AssetId {
+        AssetId::new(20).unwrap()
+    }
+
+    fn trader(id: u64) -> TraderId {
+        TraderId::new(id).unwrap()
+    }
+
+    fn market() -> MarketSpec {
+        MarketSpec::new(
+            base_asset(),
+            quote_asset(),
+            TickSize::new(1).unwrap(),
+            LotSize::new(1).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn order(id: u128, trader_id: TraderId, side: Side, price: u64, quantity: u64) -> Order {
+        Order::new(
+            OrderId::new(id).unwrap(),
+            trader_id,
+            MarketId::new(1).unwrap(),
+            side,
+            Price::new(price).unwrap(),
+            Quantity::new(quantity).unwrap(),
+            OrderSequence::new(id.try_into().unwrap()).unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn deposit_command_works() {
+        let actor = MarketActorHandle::spawn(market(), 8);
+
+        let reply = actor
+            .credit_deposit(command(1), trader(1), base_asset(), BalanceAmount::new(10))
+            .await
+            .unwrap();
+
+        assert_eq!(reply, MarketReply::DepositCredited);
+        assert_eq!(
+            actor.snapshot().await.unwrap(),
+            MarketReply::Snapshot(MarketSnapshot { event_count: 1 })
+        );
+    }
+
+    #[tokio::test]
+    async fn place_order_command_works() {
+        let actor = MarketActorHandle::spawn(market(), 8);
+
+        actor
+            .credit_deposit(
+                command(1),
+                trader(1),
+                quote_asset(),
+                BalanceAmount::new(700),
+            )
+            .await
+            .unwrap();
+        let reply = actor
+            .place_order(command(2), order(1, trader(1), Side::Bid, 100, 7))
+            .await
+            .unwrap();
+
+        assert_eq!(reply, MarketReply::OrderPlaced { fills: Vec::new() });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_senders_are_serialized_by_mailbox() {
+        let actor = MarketActorHandle::spawn(market(), 8);
+        let first = actor.clone();
+        let second = actor.clone();
+
+        let first_task = tokio::spawn(async move {
+            first
+                .credit_deposit(command(1), trader(1), base_asset(), BalanceAmount::new(7))
+                .await
+        });
+        let second_task = tokio::spawn(async move {
+            second
+                .credit_deposit(
+                    command(2),
+                    trader(2),
+                    quote_asset(),
+                    BalanceAmount::new(700),
+                )
+                .await
+        });
+
+        assert_eq!(
+            first_task.await.unwrap().unwrap(),
+            MarketReply::DepositCredited
+        );
+        assert_eq!(
+            second_task.await.unwrap().unwrap(),
+            MarketReply::DepositCredited
+        );
+        assert_eq!(
+            actor.snapshot().await.unwrap(),
+            MarketReply::Snapshot(MarketSnapshot { event_count: 2 })
+        );
+    }
+
+    #[tokio::test]
+    async fn try_send_reports_full_mailbox() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let actor = MarketActorHandle { sender };
+        let (first_reply, _first_rx) = oneshot::channel();
+        let (second_reply, _second_rx) = oneshot::channel();
+
+        actor
+            .try_send(MarketCommand::Snapshot {
+                reply_to: first_reply,
+            })
+            .unwrap();
+        let result = actor.try_send(MarketCommand::Snapshot {
+            reply_to: second_reply,
+        });
+
+        assert!(matches!(result, Err(mpsc::error::TrySendError::Full(_))));
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_actor() {
+        let actor = MarketActorHandle::spawn(market(), 8);
+
+        assert_eq!(actor.shutdown().await.unwrap(), MarketReply::Shutdown);
+        assert_eq!(actor.snapshot().await, Err(application::Error::ActorClosed));
+    }
+}

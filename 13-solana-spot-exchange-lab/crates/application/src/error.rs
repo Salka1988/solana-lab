@@ -5,6 +5,7 @@ pub enum Error {
     Domain(domain::Error),
     DuplicateCommand,
     ReplayMismatch,
+    ActorClosed,
 }
 
 impl From<domain::Error> for Error {
@@ -19,6 +20,7 @@ impl fmt::Display for Error {
             Self::Domain(error) => write!(f, "{error}"),
             Self::DuplicateCommand => f.write_str("duplicate command"),
             Self::ReplayMismatch => f.write_str("replay mismatch"),
+            Self::ActorClosed => f.write_str("actor closed"),
         }
     }
 }
