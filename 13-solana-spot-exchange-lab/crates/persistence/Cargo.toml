@@ -1,0 +1,18 @@
+[package]
+name = "persistence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+application.workspace = true
+domain.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "json", "macros", "migrate"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

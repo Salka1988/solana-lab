@@ -9,6 +9,7 @@ domain = { path = "crates/domain" }
 runtime = { path = "crates/runtime" }
 serde = "1.0.228"
 serde_json = "1.0.145"
+sqlx = "0.8.6"
 tokio = "1.46.1"
 tower = "0.5.2"
 

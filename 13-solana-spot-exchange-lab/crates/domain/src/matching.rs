@@ -22,6 +22,24 @@ impl Fill {
         }
     }
 
+    pub const fn from_parts(
+        maker_order_id: OrderId,
+        taker_order_id: OrderId,
+        maker_trader_id: TraderId,
+        taker_trader_id: TraderId,
+        price: Price,
+        quantity: Quantity,
+    ) -> Self {
+        Self {
+            maker_order_id,
+            taker_order_id,
+            maker_trader_id,
+            taker_trader_id,
+            price,
+            quantity,
+        }
+    }
+
     pub const fn maker_order_id(self) -> OrderId {
         self.maker_order_id
     }
