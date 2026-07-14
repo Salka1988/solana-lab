@@ -18,7 +18,7 @@ pub enum MarketReply {
 }
 
 #[derive(Debug)]
-pub enum MarketCommand {
+enum MarketCommand {
     CreditDeposit {
         command_id: CommandId,
         trader_id: TraderId,
@@ -49,13 +49,6 @@ impl MarketActorHandle {
         let (sender, receiver) = mpsc::channel(mailbox_capacity);
         tokio::spawn(run_market_actor(ExchangeApplication::new(market), receiver));
         Self { sender }
-    }
-
-    pub fn try_send(
-        &self,
-        command: MarketCommand,
-    ) -> Result<(), mpsc::error::TrySendError<MarketCommand>> {
-        self.sender.try_send(command)
     }
 
     pub async fn credit_deposit(
@@ -296,16 +289,15 @@ mod tests {
     #[tokio::test]
     async fn try_send_reports_full_mailbox() {
         let (sender, _receiver) = mpsc::channel(1);
-        let actor = MarketActorHandle { sender };
         let (first_reply, _first_rx) = oneshot::channel();
         let (second_reply, _second_rx) = oneshot::channel();
 
-        actor
+        sender
             .try_send(MarketCommand::Snapshot {
                 reply_to: first_reply,
             })
             .unwrap();
-        let result = actor.try_send(MarketCommand::Snapshot {
+        let result = sender.try_send(MarketCommand::Snapshot {
             reply_to: second_reply,
         });
 
