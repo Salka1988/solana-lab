@@ -74,6 +74,9 @@ pub struct InitializeMarket<'info> {
     )]
     pub vault_authority: UncheckedAccount<'info>,
 
+    /// CHECK: trusted off-chain settlement signer identity
+    pub settlement_authority: UncheckedAccount<'info>,
+
     pub system_program: Program<'info, System>,
 }
 
@@ -92,6 +95,7 @@ pub fn initialize_market_handler(ctx: Context<InitializeMarket>) -> Result<()> {
     let market_config = &mut ctx.accounts.market_config;
     market_config.protocol_config = ctx.accounts.protocol_config.key();
     market_config.admin = ctx.accounts.admin.key();
+    market_config.settlement_authority = ctx.accounts.settlement_authority.key();
     market_config.base_mint = ctx.accounts.base_mint.key();
     market_config.quote_mint = ctx.accounts.quote_mint.key();
     market_config.base_vault = ctx.accounts.base_vault.key();

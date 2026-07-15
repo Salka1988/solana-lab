@@ -66,6 +66,7 @@ struct MarketAccounts {
     base_vault: Pubkey,
     quote_vault: Pubkey,
     vault_authority: Pubkey,
+    settlement_authority: Pubkey,
 }
 
 fn initialize_market_ix(admin: Pubkey, accounts: &MarketAccounts) -> Instruction {
@@ -81,6 +82,7 @@ fn initialize_market_ix(admin: Pubkey, accounts: &MarketAccounts) -> Instruction
             base_vault: accounts.base_vault,
             quote_vault: accounts.quote_vault,
             vault_authority: accounts.vault_authority,
+            settlement_authority: accounts.settlement_authority,
             system_program: system_program::ID,
         }
         .to_account_metas(None),
@@ -114,6 +116,7 @@ fn market_accounts(protocol_config: Pubkey) -> MarketAccounts {
         base_vault: Keypair::new().pubkey(),
         quote_vault: Keypair::new().pubkey(),
         vault_authority,
+        settlement_authority: Keypair::new().pubkey(),
     }
 }
 
@@ -157,6 +160,7 @@ fn initialize_market_creates_expected_state() {
 
     assert_eq!(market.protocol_config, accounts.protocol_config);
     assert_eq!(market.admin, admin.pubkey());
+    assert_eq!(market.settlement_authority, accounts.settlement_authority);
     assert_eq!(market.base_mint, accounts.base_mint);
     assert_eq!(market.quote_mint, accounts.quote_mint);
     assert_eq!(market.base_vault, accounts.base_vault);

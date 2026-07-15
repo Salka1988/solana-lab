@@ -30,4 +30,13 @@ pub mod spot_settlement {
     pub fn withdraw(ctx: Context<Withdraw>, asset: CustodyAsset, amount: u64) -> Result<()> {
         withdraw::withdraw_handler(ctx, asset, amount)
     }
+
+    pub fn settle_fill(
+        ctx: Context<SettleFill>,
+        settlement_id: u64,
+        base_amount: u64,
+        quote_amount: u64,
+    ) -> Result<()> {
+        settlement::settle_fill_handler(ctx, settlement_id, base_amount, quote_amount)
+    }
 }

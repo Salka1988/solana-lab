@@ -12,6 +12,7 @@ litesvm = "0.10.0"
 runtime = { path = "crates/runtime" }
 serde = "1.0.228"
 serde_json = "1.0.145"
+solana-account = "3.1.0"
 solana-keypair = "3.0.1"
 solana-message = "3.0.1"
 solana-signer = "3.0.0"

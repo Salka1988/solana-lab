@@ -96,6 +96,7 @@ struct MarketAccounts {
     base_vault: Pubkey,
     quote_vault: Pubkey,
     vault_authority: Pubkey,
+    settlement_authority: Pubkey,
 }
 
 fn initialize_market_ix(admin: Pubkey, accounts: &MarketAccounts) -> Instruction {
@@ -111,6 +112,7 @@ fn initialize_market_ix(admin: Pubkey, accounts: &MarketAccounts) -> Instruction
             base_vault: accounts.base_vault,
             quote_vault: accounts.quote_vault,
             vault_authority: accounts.vault_authority,
+            settlement_authority: accounts.settlement_authority,
             system_program: system_program::ID,
         }
         .to_account_metas(None),
@@ -382,6 +384,7 @@ fn initialized_market_with_token_accounts(svm: &mut LiteSVM, admin: Keypair) -> 
         base_vault: base_vault.pubkey(),
         quote_vault: quote_vault.pubkey(),
         vault_authority,
+        settlement_authority: Keypair::new().pubkey(),
     };
 
     assert!(test_support::send_instruction(

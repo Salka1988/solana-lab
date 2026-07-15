@@ -8,8 +8,12 @@ pub enum ErrorCode {
     SameMarketVaults,
     #[msg("Only protocol admin can perform this action")]
     UnauthorizedAdmin,
+    #[msg("Only settlement authority can perform this action")]
+    UnauthorizedSettlementAuthority,
     #[msg("Market is paused")]
     MarketPaused,
+    #[msg("Settlement amount must be greater than zero")]
+    InvalidSettlementAmount,
     #[msg("Deposit amount must be greater than zero")]
     InvalidDepositAmount,
     #[msg("Withdraw amount must be greater than zero")]
@@ -28,6 +32,8 @@ pub enum ErrorCode {
     InvalidMarketVaultAuthority,
     #[msg("Insufficient available balance")]
     InsufficientAvailableBalance,
+    #[msg("Settlement balance overflow")]
+    SettlementBalanceOverflow,
     #[msg("Deposit balance overflow")]
     BalanceOverflow,
 }

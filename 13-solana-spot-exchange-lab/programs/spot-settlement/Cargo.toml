@@ -25,6 +25,7 @@ anchor-spl.workspace = true
 
 [dev-dependencies]
 litesvm.workspace = true
+solana-account.workspace = true
 solana-keypair.workspace = true
 solana-message.workspace = true
 solana-signer.workspace = true
