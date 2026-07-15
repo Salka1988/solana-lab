@@ -7,6 +7,7 @@ use {
     },
     litesvm::LiteSVM,
     solana_account::Account,
+    solana_ed25519_program::new_ed25519_instruction_with_signature,
     solana_keypair::Keypair,
     solana_signer::Signer,
 };
@@ -16,6 +17,8 @@ const SELLER_BASE_DEPOSIT: u64 = 500;
 const BASE_AMOUNT: u64 = 125;
 const QUOTE_AMOUNT: u64 = 2_500;
 const SETTLEMENT_ID: u64 = 42;
+const SIGNED_FILL_PRICE: u64 = 20;
+const SIGNED_FILL_QUANTITY: u64 = 100;
 
 fn setup() -> (LiteSVM, Keypair) {
     test_support::new_svm_with_program(
@@ -73,6 +76,18 @@ fn settlement_receipt_pda(market_config: Pubkey, settlement_id: u64) -> Pubkey {
             spot_settlement::SETTLEMENT_RECEIPT_SEED,
             market_config.as_ref(),
             &settlement_id.to_le_bytes(),
+        ],
+        &spot_settlement::id(),
+    )
+    .0
+}
+
+fn order_fill_state_pda(market_config: Pubkey, order_hash: [u8; 32]) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            spot_settlement::ORDER_FILL_STATE_SEED,
+            market_config.as_ref(),
+            order_hash.as_ref(),
         ],
         &spot_settlement::id(),
     )
@@ -155,6 +170,51 @@ fn settle_fill_ix(params: SettleFillParams<'_>) -> Instruction {
                 params.settlement_id,
             ),
             payer: params.payer,
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+struct SettleSignedFillParams<'a> {
+    authority: Pubkey,
+    market: &'a MarketAccounts,
+    buyer: Pubkey,
+    seller: Pubkey,
+    buyer_balance: Pubkey,
+    seller_balance: Pubkey,
+    buyer_order_fill_state: Pubkey,
+    seller_order_fill_state: Pubkey,
+    settlement_id: u64,
+    payer: Pubkey,
+    args: spot_settlement::SignedFillArgs,
+}
+
+fn settle_signed_fill_ix(params: SettleSignedFillParams<'_>) -> Instruction {
+    Instruction::new_with_bytes(
+        spot_settlement::id(),
+        &spot_settlement::instruction::SettleSignedFill {
+            settlement_id: params.settlement_id,
+            buyer_order_hash: params.args.buyer_order_hash,
+            seller_order_hash: params.args.seller_order_hash,
+            args: params.args,
+        }
+        .data(),
+        spot_settlement::accounts::SettleSignedFill {
+            settlement_authority: params.authority,
+            market_config: params.market.market_config,
+            buyer: params.buyer,
+            seller: params.seller,
+            buyer_balance: params.buyer_balance,
+            seller_balance: params.seller_balance,
+            buyer_order_fill_state: params.buyer_order_fill_state,
+            seller_order_fill_state: params.seller_order_fill_state,
+            settlement_receipt: settlement_receipt_pda(
+                params.market.market_config,
+                params.settlement_id,
+            ),
+            payer: params.payer,
+            instructions_sysvar: solana_sdk_ids::sysvar::instructions::ID,
             system_program: system_program::ID,
         }
         .to_account_metas(None),
@@ -276,6 +336,111 @@ fn seed_trade_balances(svm: &mut LiteSVM, fixture: &Fixture) {
         SELLER_BASE_DEPOSIT,
         0,
     );
+}
+
+fn signed_order(
+    market_config: Pubkey,
+    trader: Pubkey,
+    side: spot_settlement::SignedOrderSide,
+    order_id: u64,
+    price: u64,
+    quantity: u64,
+) -> spot_settlement::SignedOrderPayload {
+    spot_settlement::SignedOrderPayload {
+        order_id,
+        market_config,
+        trader,
+        side,
+        price,
+        quantity,
+        nonce: order_id,
+        expiry_slot: u64::MAX,
+    }
+}
+
+fn order_hash(order: spot_settlement::SignedOrderPayload) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    Sha256::digest(order.signing_preimage()).into()
+}
+
+fn signed_fill_args(
+    buyer: &Keypair,
+    seller: &Keypair,
+    market_config: Pubkey,
+    settlement_id: u64,
+    fill_quantity: u64,
+) -> spot_settlement::SignedFillArgs {
+    let buyer_order = signed_order(
+        market_config,
+        buyer.pubkey(),
+        spot_settlement::SignedOrderSide::Bid,
+        10,
+        21,
+        SIGNED_FILL_QUANTITY,
+    );
+    let seller_order = signed_order(
+        market_config,
+        seller.pubkey(),
+        spot_settlement::SignedOrderSide::Ask,
+        20,
+        19,
+        SIGNED_FILL_QUANTITY,
+    );
+    let buyer_preimage = buyer_order.signing_preimage();
+    let seller_preimage = seller_order.signing_preimage();
+
+    spot_settlement::SignedFillArgs {
+        settlement_id,
+        fill_price: SIGNED_FILL_PRICE,
+        fill_quantity,
+        buyer_order_hash: order_hash(buyer_order),
+        seller_order_hash: order_hash(seller_order),
+        buyer_order,
+        buyer_signature: *buyer.sign_message(&buyer_preimage).as_array(),
+        seller_order,
+        seller_signature: *seller.sign_message(&seller_preimage).as_array(),
+    }
+}
+
+fn signed_fill_instructions(
+    fixture: &Fixture,
+    args: spot_settlement::SignedFillArgs,
+) -> Vec<Instruction> {
+    let buyer_preimage = args.buyer_order.signing_preimage();
+    let seller_preimage = args.seller_order.signing_preimage();
+
+    vec![
+        new_ed25519_instruction_with_signature(
+            &buyer_preimage,
+            &args.buyer_signature,
+            fixture.buyer.pubkey().as_array(),
+        ),
+        new_ed25519_instruction_with_signature(
+            &seller_preimage,
+            &args.seller_signature,
+            fixture.seller.pubkey().as_array(),
+        ),
+        settle_signed_fill_ix(SettleSignedFillParams {
+            authority: fixture.settlement_authority.pubkey(),
+            market: &fixture.market,
+            buyer: fixture.buyer.pubkey(),
+            seller: fixture.seller.pubkey(),
+            buyer_balance: fixture.buyer_balance,
+            seller_balance: fixture.seller_balance,
+            buyer_order_fill_state: order_fill_state_pda(
+                fixture.market.market_config,
+                args.buyer_order_hash,
+            ),
+            seller_order_fill_state: order_fill_state_pda(
+                fixture.market.market_config,
+                args.seller_order_hash,
+            ),
+            settlement_id: args.settlement_id,
+            payer: fixture.settlement_authority.pubkey(),
+            args,
+        }),
+    ]
 }
 
 #[test]
@@ -433,5 +598,132 @@ fn settlement_rejects_insufficient_balances() {
             &[&fixture.settlement_authority],
         ),
         "Insufficient available balance",
+    );
+}
+
+#[test]
+fn signed_settlement_requires_ed25519_precompiles_and_updates_fill_state() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        100,
+        SIGNED_FILL_QUANTITY,
+    );
+
+    assert!(test_support::send_transaction(
+        &mut svm,
+        fixture.settlement_authority.pubkey(),
+        signed_fill_instructions(&fixture, args),
+        &[&fixture.settlement_authority],
+    )
+    .is_ok());
+
+    let buyer_balance = test_support::deserialize_account::<spot_settlement::TraderMarketBalance>(
+        &svm,
+        &fixture.buyer_balance,
+    );
+    let seller_balance = test_support::deserialize_account::<spot_settlement::TraderMarketBalance>(
+        &svm,
+        &fixture.seller_balance,
+    );
+    let buyer_fill_state = test_support::deserialize_account::<spot_settlement::OrderFillState>(
+        &svm,
+        &order_fill_state_pda(fixture.market.market_config, args.buyer_order_hash),
+    );
+    let receipt = test_support::deserialize_account::<spot_settlement::SettlementReceipt>(
+        &svm,
+        &settlement_receipt_pda(fixture.market.market_config, args.settlement_id),
+    );
+
+    assert_eq!(buyer_balance.available_base, SIGNED_FILL_QUANTITY);
+    assert_eq!(
+        buyer_balance.available_quote,
+        BUYER_QUOTE_DEPOSIT - SIGNED_FILL_PRICE * SIGNED_FILL_QUANTITY
+    );
+    assert_eq!(
+        seller_balance.available_base,
+        SELLER_BASE_DEPOSIT - SIGNED_FILL_QUANTITY
+    );
+    assert_eq!(
+        seller_balance.available_quote,
+        SIGNED_FILL_PRICE * SIGNED_FILL_QUANTITY
+    );
+    assert_eq!(buyer_fill_state.filled_quantity, SIGNED_FILL_QUANTITY);
+    assert_eq!(receipt.buyer_order_hash, args.buyer_order_hash);
+    assert_eq!(receipt.seller_order_hash, args.seller_order_hash);
+}
+
+#[test]
+fn signed_settlement_rejects_mismatched_ed25519_message() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        101,
+        SIGNED_FILL_QUANTITY,
+    );
+    let mut instructions = signed_fill_instructions(&fixture, args);
+    let wrong_message = b"different message";
+    let wrong_signature = *fixture.buyer.sign_message(wrong_message).as_array();
+    instructions[0] = new_ed25519_instruction_with_signature(
+        wrong_message,
+        &wrong_signature,
+        fixture.buyer.pubkey().as_array(),
+    );
+
+    test_support::assert_result_fails_with(
+        test_support::send_transaction(
+            &mut svm,
+            fixture.settlement_authority.pubkey(),
+            instructions,
+            &[&fixture.settlement_authority],
+        ),
+        "InvalidEd25519Instruction",
+    );
+}
+
+#[test]
+fn signed_settlement_tracks_partial_fills_and_rejects_overfill() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+
+    let first = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        102,
+        60,
+    );
+    assert!(test_support::send_transaction(
+        &mut svm,
+        fixture.settlement_authority.pubkey(),
+        signed_fill_instructions(&fixture, first),
+        &[&fixture.settlement_authority],
+    )
+    .is_ok());
+
+    let second = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        103,
+        41,
+    );
+    test_support::assert_result_fails_with(
+        test_support::send_transaction(
+            &mut svm,
+            fixture.settlement_authority.pubkey(),
+            signed_fill_instructions(&fixture, second),
+            &[&fixture.settlement_authority],
+        ),
+        "Fill quantity exceeds signed order remaining quantity",
     );
 }

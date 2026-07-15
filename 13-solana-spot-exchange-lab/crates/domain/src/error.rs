@@ -16,6 +16,13 @@ pub enum Error {
     AmountConversionOverflow,
     InsufficientAvailableBalance,
     InsufficientReservedBalance,
+    SignedOrderMarketMismatch,
+    SignedOrderWrongSide,
+    SignedOrderExpired,
+    SignedOrderSelfTrade,
+    SignedOrderPricesDoNotCross,
+    FillPriceOutsideSignedOrder,
+    FillQuantityExceedsSignedOrder,
 }
 
 impl fmt::Display for Error {
@@ -39,6 +46,21 @@ impl fmt::Display for Error {
             Self::AmountConversionOverflow => f.write_str("amount conversion overflow"),
             Self::InsufficientAvailableBalance => f.write_str("insufficient available balance"),
             Self::InsufficientReservedBalance => f.write_str("insufficient reserved balance"),
+            Self::SignedOrderMarketMismatch => {
+                f.write_str("signed orders must belong to the same market")
+            }
+            Self::SignedOrderWrongSide => {
+                f.write_str("signed fill requires a bid and an ask order")
+            }
+            Self::SignedOrderExpired => f.write_str("signed order is expired"),
+            Self::SignedOrderSelfTrade => f.write_str("signed fill cannot settle self trade"),
+            Self::SignedOrderPricesDoNotCross => f.write_str("signed order prices do not cross"),
+            Self::FillPriceOutsideSignedOrder => {
+                f.write_str("fill price is outside signed order limits")
+            }
+            Self::FillQuantityExceedsSignedOrder => {
+                f.write_str("fill quantity exceeds signed order quantity")
+            }
         }
     }
 }

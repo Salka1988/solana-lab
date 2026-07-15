@@ -39,4 +39,20 @@ pub mod spot_settlement {
     ) -> Result<()> {
         settlement::settle_fill_handler(ctx, settlement_id, base_amount, quote_amount)
     }
+
+    pub fn settle_signed_fill(
+        ctx: Context<SettleSignedFill>,
+        settlement_id: u64,
+        buyer_order_hash: [u8; 32],
+        seller_order_hash: [u8; 32],
+        args: SignedFillArgs,
+    ) -> Result<()> {
+        settlement::settle_signed_fill_handler(
+            ctx,
+            settlement_id,
+            buyer_order_hash,
+            seller_order_hash,
+            args,
+        )
+    }
 }

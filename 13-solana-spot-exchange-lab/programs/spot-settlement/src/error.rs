@@ -14,6 +14,22 @@ pub enum ErrorCode {
     MarketPaused,
     #[msg("Settlement amount must be greater than zero")]
     InvalidSettlementAmount,
+    #[msg("Invalid signed order")]
+    InvalidSignedOrder,
+    #[msg("Signed order is expired")]
+    SignedOrderExpired,
+    #[msg("Signed order prices do not cross")]
+    SignedOrderPricesDoNotCross,
+    #[msg("Fill price is outside signed order limits")]
+    FillPriceOutsideSignedOrder,
+    #[msg("Fill quantity exceeds signed order remaining quantity")]
+    FillQuantityExceedsSignedOrder,
+    #[msg("Invalid ed25519 verification instruction")]
+    InvalidEd25519Instruction,
+    #[msg("Order hash does not match signed order")]
+    OrderHashMismatch,
+    #[msg("Order is cancelled")]
+    OrderCancelled,
     #[msg("Deposit amount must be greater than zero")]
     InvalidDepositAmount,
     #[msg("Withdraw amount must be greater than zero")]

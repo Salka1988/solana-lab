@@ -22,10 +22,14 @@ custom-panic = []
 [dependencies]
 anchor-lang.workspace = true
 anchor-spl.workspace = true
+sha2.workspace = true
+solana-instructions-sysvar.workspace = true
+solana-sdk-ids.workspace = true
 
 [dev-dependencies]
 litesvm.workspace = true
 solana-account.workspace = true
+solana-ed25519-program.workspace = true
 solana-keypair.workspace = true
 solana-message.workspace = true
 solana-signer.workspace = true
