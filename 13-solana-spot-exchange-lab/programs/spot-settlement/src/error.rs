@@ -30,6 +30,8 @@ pub enum ErrorCode {
     OrderHashMismatch,
     #[msg("Order is cancelled")]
     OrderCancelled,
+    #[msg("Order fill state does not match order")]
+    OrderFillStateMismatch,
     #[msg("Deposit amount must be greater than zero")]
     InvalidDepositAmount,
     #[msg("Withdraw amount must be greater than zero")]

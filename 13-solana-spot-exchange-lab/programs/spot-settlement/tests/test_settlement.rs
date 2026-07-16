@@ -221,6 +221,33 @@ fn settle_signed_fill_ix(params: SettleSignedFillParams<'_>) -> Instruction {
     )
 }
 
+struct CancelSignedOrderParams<'a> {
+    trader: Pubkey,
+    market: &'a MarketAccounts,
+    order_hash: [u8; 32],
+    order: spot_settlement::SignedOrderPayload,
+    payer: Pubkey,
+}
+
+fn cancel_signed_order_ix(params: CancelSignedOrderParams<'_>) -> Instruction {
+    Instruction::new_with_bytes(
+        spot_settlement::id(),
+        &spot_settlement::instruction::CancelSignedOrder {
+            order_hash: params.order_hash,
+            order: params.order,
+        }
+        .data(),
+        spot_settlement::accounts::CancelSignedOrder {
+            trader: params.trader,
+            market_config: params.market.market_config,
+            order_fill_state: order_fill_state_pda(params.market.market_config, params.order_hash),
+            payer: params.payer,
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
 struct Fixture {
     admin: Keypair,
     settlement_authority: Keypair,
@@ -725,5 +752,131 @@ fn signed_settlement_tracks_partial_fills_and_rejects_overfill() {
             &[&fixture.settlement_authority],
         ),
         "Fill quantity exceeds signed order remaining quantity",
+    );
+}
+
+#[test]
+fn cancelled_signed_order_rejects_future_settlement() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        104,
+        SIGNED_FILL_QUANTITY,
+    );
+
+    assert!(test_support::send_instruction_with_signers(
+        &mut svm,
+        fixture.buyer.pubkey(),
+        cancel_signed_order_ix(CancelSignedOrderParams {
+            trader: fixture.buyer.pubkey(),
+            market: &fixture.market,
+            order_hash: args.buyer_order_hash,
+            order: args.buyer_order,
+            payer: fixture.buyer.pubkey(),
+        }),
+        &[&fixture.buyer],
+    ));
+
+    test_support::assert_result_fails_with(
+        test_support::send_transaction(
+            &mut svm,
+            fixture.settlement_authority.pubkey(),
+            signed_fill_instructions(&fixture, args),
+            &[&fixture.settlement_authority],
+        ),
+        "Order is cancelled",
+    );
+}
+
+#[test]
+fn partial_fill_then_cancel_rejects_remaining_fill() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let first = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        105,
+        60,
+    );
+
+    assert!(test_support::send_transaction(
+        &mut svm,
+        fixture.settlement_authority.pubkey(),
+        signed_fill_instructions(&fixture, first),
+        &[&fixture.settlement_authority],
+    )
+    .is_ok());
+    assert!(test_support::send_instruction_with_signers(
+        &mut svm,
+        fixture.buyer.pubkey(),
+        cancel_signed_order_ix(CancelSignedOrderParams {
+            trader: fixture.buyer.pubkey(),
+            market: &fixture.market,
+            order_hash: first.buyer_order_hash,
+            order: first.buyer_order,
+            payer: fixture.buyer.pubkey(),
+        }),
+        &[&fixture.buyer],
+    ));
+
+    let second = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        106,
+        40,
+    );
+    test_support::assert_result_fails_with(
+        test_support::send_transaction(
+            &mut svm,
+            fixture.settlement_authority.pubkey(),
+            signed_fill_instructions(&fixture, second),
+            &[&fixture.settlement_authority],
+        ),
+        "Order is cancelled",
+    );
+
+    let buyer_fill_state = test_support::deserialize_account::<spot_settlement::OrderFillState>(
+        &svm,
+        &order_fill_state_pda(fixture.market.market_config, first.buyer_order_hash),
+    );
+    assert_eq!(buyer_fill_state.filled_quantity, 60);
+    assert!(buyer_fill_state.cancelled);
+}
+
+#[test]
+fn signed_order_cancel_rejects_wrong_trader() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    let attacker = Keypair::new();
+    test_support::fund_user(&mut svm, &attacker);
+    let args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        107,
+        SIGNED_FILL_QUANTITY,
+    );
+
+    test_support::assert_result_fails_with(
+        test_support::send_instruction_with_signers_result(
+            &mut svm,
+            attacker.pubkey(),
+            cancel_signed_order_ix(CancelSignedOrderParams {
+                trader: attacker.pubkey(),
+                market: &fixture.market,
+                order_hash: args.buyer_order_hash,
+                order: args.buyer_order,
+                payer: attacker.pubkey(),
+            }),
+            &[&attacker],
+        ),
+        "Invalid signed order",
     );
 }

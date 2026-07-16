@@ -286,13 +286,13 @@ pub fn settle_signed_fill_handler(
         market,
         args.buyer_order_hash,
         ctx.bumps.buyer_order_fill_state,
-    );
+    )?;
     initialize_fill_state_if_needed(
         &mut ctx.accounts.seller_order_fill_state,
         market,
         args.seller_order_hash,
         ctx.bumps.seller_order_fill_state,
-    );
+    )?;
 
     apply_fill_state(
         &mut ctx.accounts.buyer_order_fill_state,
@@ -327,6 +327,65 @@ pub fn settle_signed_fill_handler(
     Ok(())
 }
 
+#[derive(Accounts)]
+#[instruction(order_hash: [u8; 32])]
+pub struct CancelSignedOrder<'info> {
+    pub trader: Signer<'info>,
+
+    #[account(
+        seeds = [
+            MARKET_CONFIG_SEED,
+            market_config.base_mint.as_ref(),
+            market_config.quote_mint.as_ref()
+        ],
+        bump = market_config.bump
+    )]
+    pub market_config: Box<Account<'info, MarketConfig>>,
+
+    #[account(
+        init_if_needed,
+        payer = payer,
+        space = OrderFillState::SPACE,
+        seeds = [
+            ORDER_FILL_STATE_SEED,
+            market_config.key().as_ref(),
+            order_hash.as_ref()
+        ],
+        bump
+    )]
+    pub order_fill_state: Box<Account<'info, OrderFillState>>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+pub fn cancel_signed_order_handler(
+    ctx: Context<CancelSignedOrder>,
+    order_hash: [u8; 32],
+    order: SignedOrderPayload,
+) -> Result<()> {
+    require!(!ctx.accounts.market_config.paused, ErrorCode::MarketPaused);
+
+    let market = ctx.accounts.market_config.key();
+    validate_cancel_order_payload(order, market, ctx.accounts.trader.key())?;
+    require!(
+        sha256_32(&order.signing_preimage()) == order_hash,
+        ErrorCode::OrderHashMismatch
+    );
+
+    initialize_fill_state_if_needed(
+        &mut ctx.accounts.order_fill_state,
+        market,
+        order_hash,
+        ctx.bumps.order_fill_state,
+    )?;
+    ctx.accounts.order_fill_state.cancelled = true;
+
+    Ok(())
+}
+
 fn validate_signed_order_payload(
     order: SignedOrderPayload,
     market: Pubkey,
@@ -336,6 +395,21 @@ fn validate_signed_order_payload(
     require!(order.market_config == market, ErrorCode::InvalidSignedOrder);
     require!(order.trader == trader, ErrorCode::InvalidSignedOrder);
     require!(order.side == side, ErrorCode::InvalidSignedOrder);
+    require!(order.order_id > 0, ErrorCode::InvalidSignedOrder);
+    require!(order.price > 0, ErrorCode::InvalidSignedOrder);
+    require!(order.quantity > 0, ErrorCode::InvalidSignedOrder);
+    require!(order.nonce > 0, ErrorCode::InvalidSignedOrder);
+    require!(order.expiry_slot > 0, ErrorCode::InvalidSignedOrder);
+    Ok(())
+}
+
+fn validate_cancel_order_payload(
+    order: SignedOrderPayload,
+    market: Pubkey,
+    trader: Pubkey,
+) -> Result<()> {
+    require!(order.market_config == market, ErrorCode::InvalidSignedOrder);
+    require!(order.trader == trader, ErrorCode::InvalidSignedOrder);
     require!(order.order_id > 0, ErrorCode::InvalidSignedOrder);
     require!(order.price > 0, ErrorCode::InvalidSignedOrder);
     require!(order.quantity > 0, ErrorCode::InvalidSignedOrder);
@@ -460,7 +534,7 @@ fn initialize_fill_state_if_needed(
     market_config: Pubkey,
     order_hash: [u8; 32],
     bump: u8,
-) {
+) -> Result<()> {
     if fill_state.market_config == Pubkey::default() {
         fill_state.market_config = market_config;
         fill_state.order_hash = order_hash;
@@ -468,6 +542,13 @@ fn initialize_fill_state_if_needed(
         fill_state.cancelled = false;
         fill_state.bump = bump;
     }
+
+    require!(
+        fill_state.market_config == market_config && fill_state.order_hash == order_hash,
+        ErrorCode::OrderFillStateMismatch
+    );
+
+    Ok(())
 }
 
 fn apply_fill_state(

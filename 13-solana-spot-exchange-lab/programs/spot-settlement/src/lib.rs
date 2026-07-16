@@ -55,4 +55,12 @@ pub mod spot_settlement {
             args,
         )
     }
+
+    pub fn cancel_signed_order(
+        ctx: Context<CancelSignedOrder>,
+        order_hash: [u8; 32],
+        order: SignedOrderPayload,
+    ) -> Result<()> {
+        settlement::cancel_signed_order_handler(ctx, order_hash, order)
+    }
 }
