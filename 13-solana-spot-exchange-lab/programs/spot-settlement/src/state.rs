@@ -26,7 +26,7 @@ pub struct SignedOrderPayload {
 
 impl SignedOrderPayload {
     pub fn signing_preimage(self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(106);
+        let mut bytes = Vec::with_capacity(138);
         bytes.extend_from_slice(b"solana-spot-exchange-lab/order/v1");
         bytes.extend_from_slice(&self.order_id.to_le_bytes());
         bytes.extend_from_slice(self.trader.as_ref());
