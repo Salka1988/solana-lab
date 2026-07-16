@@ -430,6 +430,21 @@ fn signed_fill_args(
     }
 }
 
+fn resign_signed_fill_args(
+    buyer: &Keypair,
+    seller: &Keypair,
+    mut args: spot_settlement::SignedFillArgs,
+) -> spot_settlement::SignedFillArgs {
+    let buyer_preimage = args.buyer_order.signing_preimage();
+    let seller_preimage = args.seller_order.signing_preimage();
+
+    args.buyer_order_hash = order_hash(args.buyer_order);
+    args.seller_order_hash = order_hash(args.seller_order);
+    args.buyer_signature = *buyer.sign_message(&buyer_preimage).as_array();
+    args.seller_signature = *seller.sign_message(&seller_preimage).as_array();
+    args
+}
+
 fn signed_fill_instructions(
     fixture: &Fixture,
     args: spot_settlement::SignedFillArgs,
@@ -878,5 +893,182 @@ fn signed_order_cancel_rejects_wrong_trader() {
             &[&attacker],
         ),
         "Invalid signed order",
+    );
+}
+
+#[test]
+fn signed_settlement_rejects_expired_order() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let mut args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        108,
+        SIGNED_FILL_QUANTITY,
+    );
+    args.buyer_order.expiry_slot = 0;
+    args = resign_signed_fill_args(&fixture.buyer, &fixture.seller, args);
+
+    test_support::assert_result_fails_with(
+        test_support::send_transaction(
+            &mut svm,
+            fixture.settlement_authority.pubkey(),
+            signed_fill_instructions(&fixture, args),
+            &[&fixture.settlement_authority],
+        ),
+        "Invalid signed order",
+    );
+
+    let mut args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        109,
+        SIGNED_FILL_QUANTITY,
+    );
+    args.buyer_order.expiry_slot = 1;
+    args = resign_signed_fill_args(&fixture.buyer, &fixture.seller, args);
+    svm.warp_to_slot(2);
+
+    test_support::assert_result_fails_with(
+        test_support::send_transaction(
+            &mut svm,
+            fixture.settlement_authority.pubkey(),
+            signed_fill_instructions(&fixture, args),
+            &[&fixture.settlement_authority],
+        ),
+        "Signed order is expired",
+    );
+}
+
+#[test]
+fn signed_settlement_rejects_wrong_market_payload() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let mut args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        110,
+        SIGNED_FILL_QUANTITY,
+    );
+    args.buyer_order.market_config = Keypair::new().pubkey();
+    args = resign_signed_fill_args(&fixture.buyer, &fixture.seller, args);
+
+    test_support::assert_result_fails_with(
+        test_support::send_transaction(
+            &mut svm,
+            fixture.settlement_authority.pubkey(),
+            signed_fill_instructions(&fixture, args),
+            &[&fixture.settlement_authority],
+        ),
+        "Invalid signed order",
+    );
+}
+
+#[test]
+fn signed_settlement_rejects_wrong_trader_payload() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let mut args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        111,
+        SIGNED_FILL_QUANTITY,
+    );
+    args.buyer_order.trader = fixture.seller.pubkey();
+    args = resign_signed_fill_args(&fixture.buyer, &fixture.seller, args);
+
+    test_support::assert_result_fails_with(
+        test_support::send_transaction(
+            &mut svm,
+            fixture.settlement_authority.pubkey(),
+            signed_fill_instructions(&fixture, args),
+            &[&fixture.settlement_authority],
+        ),
+        "Invalid signed order",
+    );
+}
+
+#[test]
+fn signed_settlement_rejects_order_hash_mismatch() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let mut args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        112,
+        SIGNED_FILL_QUANTITY,
+    );
+    args.buyer_order_hash = [9; 32];
+
+    test_support::assert_result_fails_with(
+        test_support::send_transaction(
+            &mut svm,
+            fixture.settlement_authority.pubkey(),
+            signed_fill_instructions(&fixture, args),
+            &[&fixture.settlement_authority],
+        ),
+        "Order hash does not match signed order",
+    );
+}
+
+#[test]
+fn signed_settlement_rejects_non_crossing_prices() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let mut args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        113,
+        SIGNED_FILL_QUANTITY,
+    );
+    args.buyer_order.price = 18;
+    args.seller_order.price = 19;
+    args.fill_price = 18;
+    args = resign_signed_fill_args(&fixture.buyer, &fixture.seller, args);
+
+    test_support::assert_result_fails_with(
+        test_support::send_transaction(
+            &mut svm,
+            fixture.settlement_authority.pubkey(),
+            signed_fill_instructions(&fixture, args),
+            &[&fixture.settlement_authority],
+        ),
+        "Signed order prices do not cross",
+    );
+}
+
+#[test]
+fn signed_settlement_rejects_fill_price_outside_signed_limits() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let mut args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        114,
+        SIGNED_FILL_QUANTITY,
+    );
+    args.fill_price = args.buyer_order.price + 1;
+
+    test_support::assert_result_fails_with(
+        test_support::send_transaction(
+            &mut svm,
+            fixture.settlement_authority.pubkey(),
+            signed_fill_instructions(&fixture, args),
+            &[&fixture.settlement_authority],
+        ),
+        "Fill price is outside signed order limits",
     );
 }
