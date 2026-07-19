@@ -9,7 +9,9 @@ use {
     solana_account::Account,
     solana_ed25519_program::new_ed25519_instruction_with_signature,
     solana_keypair::Keypair,
+    solana_message::{Message, VersionedMessage},
     solana_signer::Signer,
+    solana_transaction::versioned::VersionedTransaction,
 };
 
 const BUYER_QUOTE_DEPOSIT: u64 = 10_000;
@@ -485,6 +487,89 @@ fn signed_fill_instructions(
     ]
 }
 
+fn send_transaction_with_metadata(
+    svm: &mut LiteSVM,
+    fee_payer: Pubkey,
+    instructions: Vec<Instruction>,
+    signers: &[&Keypair],
+) -> litesvm::types::TransactionMetadata {
+    let blockhash = svm.latest_blockhash();
+    let msg = Message::new_with_blockhash(&instructions, Some(&fee_payer), &blockhash);
+    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), signers).unwrap();
+
+    svm.send_transaction(tx).unwrap()
+}
+
+fn measure_trusted_settlement_cu() -> u64 {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let meta = send_transaction_with_metadata(
+        &mut svm,
+        fixture.settlement_authority.pubkey(),
+        vec![settle_fill_ix(SettleFillParams {
+            authority: fixture.settlement_authority.pubkey(),
+            market: &fixture.market,
+            buyer: fixture.buyer.pubkey(),
+            seller: fixture.seller.pubkey(),
+            buyer_balance: fixture.buyer_balance,
+            seller_balance: fixture.seller_balance,
+            settlement_id: 200,
+            payer: fixture.settlement_authority.pubkey(),
+        })],
+        &[&fixture.settlement_authority],
+    );
+
+    meta.compute_units_consumed
+}
+
+fn measure_signed_settlement_cu() -> u64 {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        201,
+        SIGNED_FILL_QUANTITY,
+    );
+    let meta = send_transaction_with_metadata(
+        &mut svm,
+        fixture.settlement_authority.pubkey(),
+        signed_fill_instructions(&fixture, args),
+        &[&fixture.settlement_authority],
+    );
+
+    meta.compute_units_consumed
+}
+
+fn measure_cancel_signed_order_cu() -> u64 {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    let args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        202,
+        SIGNED_FILL_QUANTITY,
+    );
+    let meta = send_transaction_with_metadata(
+        &mut svm,
+        fixture.buyer.pubkey(),
+        vec![cancel_signed_order_ix(CancelSignedOrderParams {
+            trader: fixture.buyer.pubkey(),
+            market: &fixture.market,
+            order_hash: args.buyer_order_hash,
+            order: args.buyer_order,
+            payer: fixture.buyer.pubkey(),
+        })],
+        &[&fixture.buyer],
+    );
+
+    meta.compute_units_consumed
+}
+
 #[test]
 fn trusted_settlement_moves_internal_balances_and_records_receipt() {
     let (mut svm, admin) = setup();
@@ -894,6 +979,23 @@ fn signed_order_cancel_rejects_wrong_trader() {
         ),
         "Invalid signed order",
     );
+}
+
+#[test]
+fn settlement_compute_units_are_measured() {
+    let trusted_settlement = measure_trusted_settlement_cu();
+    let signed_settlement = measure_signed_settlement_cu();
+    let cancel_signed_order = measure_cancel_signed_order_cu();
+
+    println!("| Path | Compute units |");
+    println!("| --- | ---: |");
+    println!("| trusted settlement | {trusted_settlement} |");
+    println!("| signed settlement | {signed_settlement} |");
+    println!("| cancel signed order | {cancel_signed_order} |");
+
+    assert!(trusted_settlement > 0);
+    assert!(signed_settlement > trusted_settlement);
+    assert!(cancel_signed_order > 0);
 }
 
 #[test]
