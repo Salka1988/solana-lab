@@ -544,6 +544,44 @@ fn measure_signed_settlement_cu() -> u64 {
     meta.compute_units_consumed
 }
 
+fn measure_signed_settlement_first_and_later_fill_cu() -> (u64, u64) {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let first = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        203,
+        60,
+    );
+    let second = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        204,
+        20,
+    );
+
+    let first_meta = send_transaction_with_metadata(
+        &mut svm,
+        fixture.settlement_authority.pubkey(),
+        signed_fill_instructions(&fixture, first),
+        &[&fixture.settlement_authority],
+    );
+    let second_meta = send_transaction_with_metadata(
+        &mut svm,
+        fixture.settlement_authority.pubkey(),
+        signed_fill_instructions(&fixture, second),
+        &[&fixture.settlement_authority],
+    );
+
+    (
+        first_meta.compute_units_consumed,
+        second_meta.compute_units_consumed,
+    )
+}
+
 fn measure_cancel_signed_order_cu() -> u64 {
     let (mut svm, admin) = setup();
     let fixture = initialized_market(&mut svm, admin);
@@ -985,16 +1023,21 @@ fn signed_order_cancel_rejects_wrong_trader() {
 fn settlement_compute_units_are_measured() {
     let trusted_settlement = measure_trusted_settlement_cu();
     let signed_settlement = measure_signed_settlement_cu();
+    let (signed_first_fill, signed_later_fill) =
+        measure_signed_settlement_first_and_later_fill_cu();
     let cancel_signed_order = measure_cancel_signed_order_cu();
 
     println!("| Path | Compute units |");
     println!("| --- | ---: |");
     println!("| trusted settlement | {trusted_settlement} |");
     println!("| signed settlement | {signed_settlement} |");
+    println!("| signed settlement first partial fill | {signed_first_fill} |");
+    println!("| signed settlement later partial fill | {signed_later_fill} |");
     println!("| cancel signed order | {cancel_signed_order} |");
 
     assert!(trusted_settlement > 0);
     assert!(signed_settlement > trusted_settlement);
+    assert!(signed_later_fill > trusted_settlement);
     assert!(cancel_signed_order > 0);
 }
 
