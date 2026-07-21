@@ -582,6 +582,44 @@ fn measure_signed_settlement_first_and_later_fill_cu() -> (u64, u64) {
     )
 }
 
+fn measure_signed_settlement_first_and_final_fill_cu() -> (u64, u64) {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let first = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        205,
+        60,
+    );
+    let final_fill = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        206,
+        40,
+    );
+
+    let first_meta = send_transaction_with_metadata(
+        &mut svm,
+        fixture.settlement_authority.pubkey(),
+        signed_fill_instructions(&fixture, first),
+        &[&fixture.settlement_authority],
+    );
+    let final_meta = send_transaction_with_metadata(
+        &mut svm,
+        fixture.settlement_authority.pubkey(),
+        signed_fill_instructions(&fixture, final_fill),
+        &[&fixture.settlement_authority],
+    );
+
+    (
+        first_meta.compute_units_consumed,
+        final_meta.compute_units_consumed,
+    )
+}
+
 fn measure_cancel_signed_order_cu() -> u64 {
     let (mut svm, admin) = setup();
     let fixture = initialized_market(&mut svm, admin);
@@ -1025,6 +1063,8 @@ fn settlement_compute_units_are_measured() {
     let signed_settlement = measure_signed_settlement_cu();
     let (signed_first_fill, signed_later_fill) =
         measure_signed_settlement_first_and_later_fill_cu();
+    let (signed_first_fill_before_final, signed_final_fill) =
+        measure_signed_settlement_first_and_final_fill_cu();
     let cancel_signed_order = measure_cancel_signed_order_cu();
 
     println!("| Path | Compute units |");
@@ -1033,11 +1073,17 @@ fn settlement_compute_units_are_measured() {
     println!("| signed settlement | {signed_settlement} |");
     println!("| signed settlement first partial fill | {signed_first_fill} |");
     println!("| signed settlement later partial fill | {signed_later_fill} |");
+    println!(
+        "| signed settlement first partial fill before final | {signed_first_fill_before_final} |"
+    );
+    println!("| signed settlement final fill | {signed_final_fill} |");
     println!("| cancel signed order | {cancel_signed_order} |");
 
     assert!(trusted_settlement > 0);
     assert!(signed_settlement > trusted_settlement);
     assert!(signed_later_fill > trusted_settlement);
+    assert!(signed_first_fill_before_final > trusted_settlement);
+    assert!(signed_final_fill > trusted_settlement);
     assert!(cancel_signed_order > 0);
 }
 
