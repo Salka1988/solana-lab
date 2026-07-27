@@ -1,27 +1,22 @@
 #![forbid(unsafe_code)]
 
-use core::{future::Future, pin::Pin};
-
 use application::{CommandId, ExchangeApplication};
+use async_trait::async_trait;
 use domain::{AssetId, BalanceAmount, Fill, MarketSpec, Order, TraderId};
 use tokio::sync::{mpsc, oneshot};
 
+#[async_trait]
 pub trait EventJournal: Send + 'static {
-    fn append<'a>(
-        &'a mut self,
-        event: &'a application::Event,
-    ) -> Pin<Box<dyn Future<Output = application::Result<()>> + Send + 'a>>;
+    async fn append(&mut self, event: &application::Event) -> application::Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoopEventJournal;
 
+#[async_trait]
 impl EventJournal for NoopEventJournal {
-    fn append<'a>(
-        &'a mut self,
-        _event: &'a application::Event,
-    ) -> Pin<Box<dyn Future<Output = application::Result<()>> + Send + 'a>> {
-        Box::pin(async { Ok(()) })
+    async fn append(&mut self, _event: &application::Event) -> application::Result<()> {
+        Ok(())
     }
 }
 
@@ -291,29 +286,21 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl EventJournal for RecordedEvents {
-        fn append<'a>(
-            &'a mut self,
-            event: &'a application::Event,
-        ) -> Pin<Box<dyn Future<Output = application::Result<()>> + Send + 'a>> {
-            let event = event.clone();
-            let events = Arc::clone(&self.events);
-            Box::pin(async move {
-                events.lock().unwrap().push(event);
-                Ok(())
-            })
+        async fn append(&mut self, event: &application::Event) -> application::Result<()> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
         }
     }
 
     #[derive(Debug, Clone, Copy)]
     struct FailingJournal;
 
+    #[async_trait]
     impl EventJournal for FailingJournal {
-        fn append<'a>(
-            &'a mut self,
-            _event: &'a application::Event,
-        ) -> Pin<Box<dyn Future<Output = application::Result<()>> + Send + 'a>> {
-            Box::pin(async { Err(application::Error::JournalAppendFailed) })
+        async fn append(&mut self, _event: &application::Event) -> application::Result<()> {
+            Err(application::Error::JournalAppendFailed)
         }
     }
 
