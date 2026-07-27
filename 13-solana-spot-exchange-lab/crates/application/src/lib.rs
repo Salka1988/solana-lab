@@ -61,6 +61,10 @@ impl ExchangeApplication {
         &self.events
     }
 
+    pub fn last_event(&self) -> Option<&Event> {
+        self.events.last()
+    }
+
     pub fn credit_deposit(
         &mut self,
         command_id: CommandId,

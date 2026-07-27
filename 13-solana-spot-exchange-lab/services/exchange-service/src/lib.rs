@@ -262,6 +262,7 @@ impl From<application::Error> for ApiError {
             application::Error::DuplicateCommand => Self::Conflict(value.to_string()),
             application::Error::ActorClosed => Self::Internal("actor closed"),
             application::Error::ReplayMismatch => Self::Internal("replay mismatch"),
+            application::Error::JournalAppendFailed => Self::Internal("journal append failed"),
         }
     }
 }

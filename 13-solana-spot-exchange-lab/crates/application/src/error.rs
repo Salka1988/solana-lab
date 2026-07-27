@@ -6,6 +6,7 @@ pub enum Error {
     DuplicateCommand,
     ReplayMismatch,
     ActorClosed,
+    JournalAppendFailed,
 }
 
 impl From<domain::Error> for Error {
@@ -21,6 +22,7 @@ impl fmt::Display for Error {
             Self::DuplicateCommand => f.write_str("duplicate command"),
             Self::ReplayMismatch => f.write_str("replay mismatch"),
             Self::ActorClosed => f.write_str("actor closed"),
+            Self::JournalAppendFailed => f.write_str("journal append failed"),
         }
     }
 }
