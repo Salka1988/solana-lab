@@ -61,10 +61,6 @@ impl ExchangeApplication {
         &self.events
     }
 
-    pub fn last_event(&self) -> Option<&Event> {
-        self.events.last()
-    }
-
     pub fn credit_deposit(
         &mut self,
         command_id: CommandId,
@@ -72,32 +68,52 @@ impl ExchangeApplication {
         asset_id: AssetId,
         amount: BalanceAmount,
     ) -> Result<()> {
+        let event = self.credit_deposit_event(command_id, trader_id, asset_id, amount)?;
+        self.apply_event(event)
+    }
+
+    pub fn credit_deposit_event(
+        &self,
+        command_id: CommandId,
+        trader_id: TraderId,
+        asset_id: AssetId,
+        amount: BalanceAmount,
+    ) -> Result<Event> {
         self.reject_duplicate(command_id)?;
-        let event = Event::DepositCredited {
+        Ok(Event::DepositCredited {
             command_id,
             trader_id,
             asset_id,
             amount,
-        };
-
-        self.apply_event(event)
+        })
     }
 
     pub fn place_order(&mut self, command_id: CommandId, order: Order) -> Result<Vec<Fill>> {
+        let (event, fills) = self.place_order_event(command_id, order)?;
+        self.apply_event(event)?;
+
+        Ok(fills)
+    }
+
+    pub fn place_order_event(
+        &self,
+        command_id: CommandId,
+        order: Order,
+    ) -> Result<(Event, Vec<Fill>)> {
         self.reject_duplicate(command_id)?;
 
-        let fills = self.place_order_in_domain(order)?;
+        let mut simulation = self.clone();
+        let fills = simulation.place_order_in_domain(order)?;
         let event = Event::OrderPlaced {
             command_id,
             order,
             fills: fills.clone(),
         };
-        self.record_applied_event(event)?;
 
-        Ok(fills)
+        Ok((event, fills))
     }
 
-    fn apply_event(&mut self, event: Event) -> Result<()> {
+    pub fn apply_event(&mut self, event: Event) -> Result<()> {
         self.reject_duplicate(event.command_id())?;
 
         match event {
@@ -277,6 +293,53 @@ mod tests {
         assert!(app.events().is_empty());
         assert!(app.matching().bids().is_empty());
         assert!(app.matching().asks().is_empty());
+    }
+
+    #[test]
+    fn deposit_event_derivation_does_not_mutate_state() {
+        let mut app = ExchangeApplication::new(market());
+
+        let event = app
+            .credit_deposit_event(command(1), trader(1), base_asset(), BalanceAmount::new(10))
+            .unwrap();
+
+        let balance = app.balances().balance(trader(1), base_asset());
+        assert_eq!(balance.available(), BalanceAmount::ZERO);
+        assert!(app.events().is_empty());
+
+        app.apply_event(event).unwrap();
+
+        let balance = app.balances().balance(trader(1), base_asset());
+        assert_eq!(balance.available(), BalanceAmount::new(10));
+        assert_eq!(app.events().len(), 1);
+    }
+
+    #[test]
+    fn order_event_derivation_does_not_mutate_state() {
+        let mut app = ExchangeApplication::new(market());
+        let ask = order(1, trader(1), Side::Ask, 100, 7);
+
+        app.credit_deposit(command(1), trader(1), base_asset(), BalanceAmount::new(7))
+            .unwrap();
+        let (event, fills) = app.place_order_event(command(2), ask).unwrap();
+
+        assert!(fills.is_empty());
+        let base_balance = app.balances().balance(trader(1), base_asset());
+        assert_eq!(base_balance.available(), BalanceAmount::new(7));
+        assert_eq!(base_balance.reserved(), BalanceAmount::ZERO);
+        assert!(app.matching().asks().is_empty());
+        assert_eq!(app.events().len(), 1);
+
+        app.apply_event(event).unwrap();
+
+        let base_balance = app.balances().balance(trader(1), base_asset());
+        assert_eq!(base_balance.available(), BalanceAmount::ZERO);
+        assert_eq!(base_balance.reserved(), BalanceAmount::new(7));
+        assert_eq!(
+            app.matching().asks().best_order().unwrap().id(),
+            OrderId::new(1).unwrap()
+        );
+        assert_eq!(app.events().len(), 2);
     }
 
     #[test]

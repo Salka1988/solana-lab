@@ -171,14 +171,10 @@ async fn handle_command(
             asset_id,
             amount,
             reply_to,
-        } => match app.credit_deposit(command_id, trader_id, asset_id, amount) {
-            Ok(()) => {
-                let should_shutdown = persist_last_event(app, journal).await.is_err();
-                let reply = if should_shutdown {
-                    Err(application::Error::JournalAppendFailed)
-                } else {
-                    Ok(MarketReply::DepositCredited)
-                };
+        } => match app.credit_deposit_event(command_id, trader_id, asset_id, amount) {
+            Ok(event) => {
+                let (reply, should_shutdown) =
+                    persist_and_apply(app, journal, event, MarketReply::DepositCredited).await;
                 let _ = reply_to.send(reply);
                 should_shutdown
             }
@@ -191,14 +187,11 @@ async fn handle_command(
             command_id,
             order,
             reply_to,
-        } => match app.place_order(command_id, order) {
-            Ok(fills) => {
-                let should_shutdown = persist_last_event(app, journal).await.is_err();
-                let reply = if should_shutdown {
-                    Err(application::Error::JournalAppendFailed)
-                } else {
-                    Ok(MarketReply::OrderPlaced { fills })
-                };
+        } => match app.place_order_event(command_id, order) {
+            Ok((event, fills)) => {
+                let (reply, should_shutdown) =
+                    persist_and_apply(app, journal, event, MarketReply::OrderPlaced { fills })
+                        .await;
                 let _ = reply_to.send(reply);
                 should_shutdown
             }
@@ -221,14 +214,20 @@ async fn handle_command(
     }
 }
 
-async fn persist_last_event(
-    app: &ExchangeApplication,
+async fn persist_and_apply(
+    app: &mut ExchangeApplication,
     journal: &mut impl EventJournal,
-) -> application::Result<()> {
-    let event = app
-        .last_event()
-        .ok_or(application::Error::JournalAppendFailed)?;
-    journal.append(event).await
+    event: application::Event,
+    success_reply: MarketReply,
+) -> (application::Result<MarketReply>, bool) {
+    if journal.append(&event).await.is_err() {
+        return (Err(application::Error::JournalAppendFailed), false);
+    }
+
+    match app.apply_event(event) {
+        Ok(()) => (Ok(success_reply), false),
+        Err(error) => (Err(error), true),
+    }
 }
 
 #[cfg(test)]
@@ -431,7 +430,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn journal_failure_rejects_reply_and_closes_actor() {
+    async fn journal_failure_rejects_reply_without_mutating_actor() {
         let actor = MarketActorHandle::spawn_with_journal(market(), 8, FailingJournal);
 
         assert_eq!(
@@ -440,6 +439,9 @@ mod tests {
                 .await,
             Err(application::Error::JournalAppendFailed)
         );
-        assert_eq!(actor.snapshot().await, Err(application::Error::ActorClosed));
+        assert_eq!(
+            actor.snapshot().await.unwrap(),
+            MarketReply::Snapshot(MarketSnapshot { event_count: 0 })
+        );
     }
 }
