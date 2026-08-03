@@ -26,6 +26,14 @@ pub struct ServiceState {
 pub fn app() -> Router {
     let market = default_market();
     let actor = MarketActorHandle::spawn(market, 1024);
+    app_with_actor(MARKET_SOL_USDC, market, actor)
+}
+
+pub fn app_with_actor(
+    market_id: impl Into<String>,
+    market: MarketSpec,
+    actor: MarketActorHandle,
+) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -33,7 +41,7 @@ pub fn app() -> Router {
         .route("/orders", post(place_order))
         .route("/markets/{market_id}/snapshot", get(snapshot))
         .with_state(ServiceState {
-            market_id: MARKET_SOL_USDC.to_owned(),
+            market_id: market_id.into(),
             market,
             actor,
         })
@@ -415,5 +423,67 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn app_with_replayed_actor_restores_event_count_and_rejects_duplicate_command() {
+        let market = default_market();
+        let mut source = application::ExchangeApplication::new(market);
+        source
+            .credit_deposit(
+                application::CommandId::new(1).unwrap(),
+                TraderId::new(1).unwrap(),
+                AssetId::new(1).unwrap(),
+                BalanceAmount::new(7),
+            )
+            .unwrap();
+        let replayed =
+            application::ExchangeApplication::replay(market, source.events().iter().cloned())
+                .unwrap();
+        let actor = MarketActorHandle::spawn_from_app(replayed, 8, runtime::NoopEventJournal);
+        let service = app_with_actor(MARKET_SOL_USDC, market, actor);
+
+        let ready = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ready.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(ready).await,
+            json!({
+                "status": "ready",
+                "market_id": "SOL-USDC",
+                "event_count": 1
+            })
+        );
+
+        let duplicate = service
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/deposits")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "command_id": 1,
+                            "trader_id": 2,
+                            "asset_id": 1,
+                            "amount": 7
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
     }
 }

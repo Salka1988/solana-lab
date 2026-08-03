@@ -70,12 +70,16 @@ impl MarketActorHandle {
         mailbox_capacity: usize,
         journal: J,
     ) -> Self {
+        Self::spawn_from_app(ExchangeApplication::new(market), mailbox_capacity, journal)
+    }
+
+    pub fn spawn_from_app<J: EventJournal>(
+        app: ExchangeApplication,
+        mailbox_capacity: usize,
+        journal: J,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel(mailbox_capacity);
-        tokio::spawn(run_market_actor(
-            ExchangeApplication::new(market),
-            receiver,
-            journal,
-        ));
+        tokio::spawn(run_market_actor(app, receiver, journal));
         Self { sender }
     }
 
@@ -427,6 +431,35 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].command_id(), command(1));
         assert_eq!(events[1].command_id(), command(2));
+    }
+
+    #[tokio::test]
+    async fn actor_started_from_replay_rejects_duplicate_command() {
+        let mut source = ExchangeApplication::new(market());
+        source
+            .credit_deposit(command(1), trader(1), base_asset(), BalanceAmount::new(7))
+            .unwrap();
+        let replayed = ExchangeApplication::replay(market(), source.events().iter().cloned())
+            .expect("replayed app");
+        let actor = MarketActorHandle::spawn_from_app(replayed, 8, NoopEventJournal);
+
+        assert_eq!(
+            actor.snapshot().await.unwrap(),
+            MarketReply::Snapshot(MarketSnapshot { event_count: 1 })
+        );
+        assert_eq!(
+            actor
+                .credit_deposit(command(1), trader(2), base_asset(), BalanceAmount::new(7))
+                .await,
+            Err(application::Error::DuplicateCommand)
+        );
+        assert_eq!(
+            actor
+                .credit_deposit(command(2), trader(2), base_asset(), BalanceAmount::new(7))
+                .await
+                .unwrap(),
+            MarketReply::DepositCredited
+        );
     }
 
     #[tokio::test]
