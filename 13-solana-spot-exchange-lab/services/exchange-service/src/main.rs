@@ -1,8 +1,9 @@
 use std::net::SocketAddr;
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, exchange_service::app()).await
+    axum::serve(listener, exchange_service::app_from_env().await?).await?;
+    Ok(())
 }

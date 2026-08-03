@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use core::fmt;
+use std::env;
 
 use async_trait::async_trait;
 use axum::{
@@ -19,6 +20,8 @@ use runtime::{MarketActorHandle, MarketReply, MarketSnapshot};
 use serde::{Deserialize, Serialize};
 
 const MARKET_SOL_USDC: &str = "SOL-USDC";
+pub const EXCHANGE_BOOT_MODE_ENV: &str = "EXCHANGE_BOOT_MODE";
+pub const DATABASE_URL_ENV: &str = "DATABASE_URL";
 
 #[derive(Clone)]
 pub struct ServiceState {
@@ -52,6 +55,24 @@ pub fn app() -> Router {
     let market = default_market();
     let actor = MarketActorHandle::spawn(market, 1024);
     app_with_actor(MARKET_SOL_USDC, market, actor)
+}
+
+pub async fn app_from_env() -> Result<Router, StartupError> {
+    app_from_config(BootConfig::from_env()?).await
+}
+
+pub async fn app_from_config(config: BootConfig) -> Result<Router, StartupError> {
+    match config.mode {
+        BootMode::Local => Ok(app()),
+        BootMode::Postgres => {
+            app_with_postgres(
+                config.database_url.as_deref().ok_or_else(|| {
+                    StartupError::Config(format!("{DATABASE_URL_ENV} is required"))
+                })?,
+            )
+            .await
+        }
+    }
 }
 
 pub async fn app_with_postgres(database_url: &str) -> Result<Router, StartupError> {
@@ -95,8 +116,58 @@ pub fn default_market() -> MarketSpec {
     .unwrap()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootConfig {
+    pub mode: BootMode,
+    pub database_url: Option<String>,
+}
+
+impl BootConfig {
+    pub fn from_env() -> Result<Self, StartupError> {
+        Self::from_values(
+            env::var(EXCHANGE_BOOT_MODE_ENV).ok().as_deref(),
+            env::var(DATABASE_URL_ENV).ok().as_deref(),
+        )
+    }
+
+    pub fn from_values(
+        boot_mode: Option<&str>,
+        database_url: Option<&str>,
+    ) -> Result<Self, StartupError> {
+        let mode = boot_mode.map_or(Ok(BootMode::Local), BootMode::parse)?;
+        let database_url = database_url.map(str::to_owned);
+
+        if mode == BootMode::Postgres && database_url.is_none() {
+            return Err(StartupError::Config(format!(
+                "{DATABASE_URL_ENV} is required"
+            )));
+        }
+
+        Ok(Self { mode, database_url })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootMode {
+    Local,
+    Postgres,
+}
+
+impl BootMode {
+    fn parse(value: &str) -> Result<Self, StartupError> {
+        match value {
+            "" | "local" => Ok(Self::Local),
+            "postgres" => Ok(Self::Postgres),
+            _ => Err(StartupError::Config(format!(
+                "unsupported {EXCHANGE_BOOT_MODE_ENV}: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum StartupError {
+    Config(String),
     Persistence(PersistenceError),
     Application(application::Error),
 }
@@ -116,6 +187,7 @@ impl From<application::Error> for StartupError {
 impl fmt::Display for StartupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Config(error) => write!(f, "configuration startup failed: {error}"),
             Self::Persistence(error) => write!(f, "persistence startup failed: {error}"),
             Self::Application(error) => write!(f, "application replay failed: {error}"),
         }
@@ -373,6 +445,84 @@ mod tests {
     async fn response_json(response: axum::response::Response) -> Value {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn boot_config_defaults_to_local_without_database() {
+        assert_eq!(
+            BootConfig::from_values(None, None).unwrap(),
+            BootConfig {
+                mode: BootMode::Local,
+                database_url: None
+            }
+        );
+    }
+
+    #[test]
+    fn boot_config_allows_explicit_local_without_database() {
+        assert_eq!(
+            BootConfig::from_values(Some("local"), None).unwrap(),
+            BootConfig {
+                mode: BootMode::Local,
+                database_url: None
+            }
+        );
+    }
+
+    #[test]
+    fn boot_config_requires_database_url_for_postgres() {
+        assert!(matches!(
+            BootConfig::from_values(Some("postgres"), None),
+            Err(StartupError::Config(_))
+        ));
+
+        assert_eq!(
+            BootConfig::from_values(Some("postgres"), Some("postgres://localhost/exchange"))
+                .unwrap(),
+            BootConfig {
+                mode: BootMode::Postgres,
+                database_url: Some("postgres://localhost/exchange".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn boot_config_rejects_unknown_mode() {
+        assert!(matches!(
+            BootConfig::from_values(Some("memory"), None),
+            Err(StartupError::Config(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn app_from_local_config_reports_ready() {
+        let service = app_from_config(BootConfig {
+            mode: BootMode::Local,
+            database_url: None,
+        })
+        .await
+        .unwrap();
+
+        let ready = service
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(ready.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(ready).await,
+            json!({
+                "status": "ready",
+                "market_id": "SOL-USDC",
+                "event_count": 0
+            })
+        );
     }
 
     #[tokio::test]
