@@ -6,8 +6,10 @@ license.workspace = true
 
 [dependencies]
 application.workspace = true
+async-trait.workspace = true
 axum = { workspace = true, features = ["json"] }
 domain.workspace = true
+persistence.workspace = true
 runtime.workspace = true
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }

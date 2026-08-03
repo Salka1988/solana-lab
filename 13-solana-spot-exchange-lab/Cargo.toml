@@ -9,6 +9,7 @@ application = { path = "crates/application" }
 async-trait = "0.1.89"
 axum = "0.8.4"
 domain = { path = "crates/domain" }
+persistence = { path = "crates/persistence" }
 litesvm = { version = "0.10.0", features = ["precompiles"] }
 runtime = { path = "crates/runtime" }
 serde = "1.0.228"

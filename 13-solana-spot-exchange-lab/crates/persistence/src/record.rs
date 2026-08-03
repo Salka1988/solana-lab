@@ -1,3 +1,5 @@
+use core::fmt;
+
 use application::{CommandId, Event};
 use domain::{
     AssetId, BalanceAmount, Fill, MarketId, Order, OrderId, OrderSequence, Price, Quantity, Side,
@@ -13,6 +15,20 @@ pub enum PersistenceError {
     Sql(String),
     UnknownEventType(String),
 }
+
+impl fmt::Display for PersistenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Application(error) => write!(f, "{error}"),
+            Self::Domain(error) => write!(f, "{error}"),
+            Self::Serde(error) => write!(f, "serde error: {error}"),
+            Self::Sql(error) => write!(f, "sql error: {error}"),
+            Self::UnknownEventType(event_type) => write!(f, "unknown event type: {event_type}"),
+        }
+    }
+}
+
+impl std::error::Error for PersistenceError {}
 
 impl From<application::Error> for PersistenceError {
     fn from(value: application::Error) -> Self {

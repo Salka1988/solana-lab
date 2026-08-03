@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+use core::fmt;
+
+use async_trait::async_trait;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -11,6 +14,7 @@ use domain::{
     AssetId, BalanceAmount, LotSize, MarketId, MarketSpec, Order, OrderId, OrderSequence, Price,
     Quantity, Side, TickSize, TraderId,
 };
+use persistence::{PersistenceError, PostgresEventJournal};
 use runtime::{MarketActorHandle, MarketReply, MarketSnapshot};
 use serde::{Deserialize, Serialize};
 
@@ -23,10 +27,44 @@ pub struct ServiceState {
     actor: MarketActorHandle,
 }
 
+#[derive(Debug, Clone)]
+pub struct PostgresRuntimeJournal {
+    journal: PostgresEventJournal,
+}
+
+impl PostgresRuntimeJournal {
+    pub const fn new(journal: PostgresEventJournal) -> Self {
+        Self { journal }
+    }
+}
+
+#[async_trait]
+impl runtime::EventJournal for PostgresRuntimeJournal {
+    async fn append(&mut self, event: &application::Event) -> application::Result<()> {
+        self.journal
+            .append(event)
+            .await
+            .map_err(|_| application::Error::JournalAppendFailed)
+    }
+}
+
 pub fn app() -> Router {
     let market = default_market();
     let actor = MarketActorHandle::spawn(market, 1024);
     app_with_actor(MARKET_SOL_USDC, market, actor)
+}
+
+pub async fn app_with_postgres(database_url: &str) -> Result<Router, StartupError> {
+    let market = default_market();
+    let journal = PostgresEventJournal::connect(database_url).await?;
+    journal.migrate().await?;
+
+    let events = journal.read_all().await?;
+    let exchange = application::ExchangeApplication::replay(market, events)?;
+    let actor =
+        MarketActorHandle::spawn_from_app(exchange, 1024, PostgresRuntimeJournal::new(journal));
+
+    Ok(app_with_actor(MARKET_SOL_USDC, market, actor))
 }
 
 pub fn app_with_actor(
@@ -56,6 +94,35 @@ pub fn default_market() -> MarketSpec {
     )
     .unwrap()
 }
+
+#[derive(Debug)]
+pub enum StartupError {
+    Persistence(PersistenceError),
+    Application(application::Error),
+}
+
+impl From<PersistenceError> for StartupError {
+    fn from(value: PersistenceError) -> Self {
+        Self::Persistence(value)
+    }
+}
+
+impl From<application::Error> for StartupError {
+    fn from(value: application::Error) -> Self {
+        Self::Application(value)
+    }
+}
+
+impl fmt::Display for StartupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Persistence(error) => write!(f, "persistence startup failed: {error}"),
+            Self::Application(error) => write!(f, "application replay failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for StartupError {}
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
@@ -485,5 +552,29 @@ mod tests {
             .unwrap();
 
         assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn app_with_postgres_boots_and_reports_ready() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let service = app_with_postgres(&database_url).await.unwrap();
+
+        let ready = service
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(ready.status(), StatusCode::OK);
+        let body = response_json(ready).await;
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["market_id"], MARKET_SOL_USDC);
+        assert!(body["event_count"].is_number());
     }
 }
