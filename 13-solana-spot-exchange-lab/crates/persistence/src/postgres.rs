@@ -33,7 +33,7 @@ impl PostgresEventJournal {
         sqlx::query(
             r#"
             INSERT INTO event_journal (command_id, event_type, payload)
-            VALUES ($1, $2, $3)
+            VALUES ($1::NUMERIC, $2, $3)
             "#,
         )
         .bind(record.command_id.get().to_string())
