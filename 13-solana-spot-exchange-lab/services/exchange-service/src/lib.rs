@@ -18,6 +18,8 @@ use domain::{
 use persistence::{PersistenceError, PostgresEventJournal};
 use runtime::{MarketActorHandle, MarketReply, MarketSnapshot};
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 const MARKET_SOL_USDC: &str = "SOL-USDC";
 pub const EXCHANGE_BOOT_MODE_ENV: &str = "EXCHANGE_BOOT_MODE";
@@ -62,6 +64,7 @@ pub async fn app_from_env() -> Result<Router, StartupError> {
 }
 
 pub async fn app_from_config(config: BootConfig) -> Result<Router, StartupError> {
+    info!(boot_mode = ?config.mode, "building exchange service");
     match config.mode {
         BootMode::Local => Ok(app()),
         BootMode::Postgres => {
@@ -77,10 +80,13 @@ pub async fn app_from_config(config: BootConfig) -> Result<Router, StartupError>
 
 pub async fn app_with_postgres(database_url: &str) -> Result<Router, StartupError> {
     let market = default_market();
+    info!("connecting postgres event journal");
     let journal = PostgresEventJournal::connect(database_url).await?;
+    info!("running postgres migrations");
     journal.migrate().await?;
 
     let events = journal.read_all().await?;
+    info!(event_count = events.len(), "replaying exchange events");
     let exchange = application::ExchangeApplication::replay(market, events)?;
     let actor =
         MarketActorHandle::spawn_from_app(exchange, 1024, PostgresRuntimeJournal::new(journal));
@@ -114,6 +120,15 @@ pub fn default_market() -> MarketSpec {
         LotSize::new(1).unwrap(),
     )
     .unwrap()
+}
+
+pub fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let subscriber = FmtSubscriber::builder()
+        .with_env_filter(filter)
+        .with_target(false)
+        .finish();
+    let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +217,11 @@ async fn health() -> Json<HealthResponse> {
 
 async fn ready(State(state): State<ServiceState>) -> Result<Json<ReadyResponse>, ApiError> {
     let snapshot = actor_snapshot(&state.actor).await?;
+    info!(
+        market_id = %state.market_id,
+        event_count = snapshot.event_count,
+        "readiness checked"
+    );
     Ok(Json(ReadyResponse {
         status: "ready",
         market_id: state.market_id,
@@ -213,6 +233,13 @@ async fn credit_deposit(
     State(state): State<ServiceState>,
     Json(request): Json<DepositRequest>,
 ) -> Result<Json<DepositResponse>, ApiError> {
+    info!(
+        command_id = request.command_id,
+        trader_id = request.trader_id,
+        asset_id = request.asset_id,
+        amount = request.amount,
+        "credit deposit requested"
+    );
     let reply = state
         .actor
         .credit_deposit(
@@ -224,7 +251,10 @@ async fn credit_deposit(
         .await?;
 
     match reply {
-        MarketReply::DepositCredited => Ok(Json(DepositResponse { accepted: true })),
+        MarketReply::DepositCredited => {
+            info!(command_id = request.command_id, "credit deposit accepted");
+            Ok(Json(DepositResponse { accepted: true }))
+        }
         _ => Err(ApiError::Internal("unexpected deposit reply")),
     }
 }
@@ -233,6 +263,17 @@ async fn place_order(
     State(state): State<ServiceState>,
     Json(request): Json<OrderRequest>,
 ) -> Result<Json<OrderResponse>, ApiError> {
+    info!(
+        command_id = request.command_id,
+        order_id = request.order_id,
+        trader_id = request.trader_id,
+        market_id = request.market_id,
+        side = ?request.side,
+        price = request.price,
+        quantity = request.quantity,
+        sequence = request.sequence,
+        "order requested"
+    );
     let order = Order::new(
         order_id(request.order_id)?,
         trader_id(request.trader_id)?,
@@ -252,18 +293,26 @@ async fn place_order(
         .await?;
 
     match reply {
-        MarketReply::OrderPlaced { fills } => Ok(Json(OrderResponse {
-            accepted: true,
-            fills: fills
-                .into_iter()
-                .map(|fill| FillResponse {
-                    maker_order_id: fill.maker_order_id().get(),
-                    taker_order_id: fill.taker_order_id().get(),
-                    price: fill.price().get(),
-                    quantity: fill.quantity().get(),
-                })
-                .collect(),
-        })),
+        MarketReply::OrderPlaced { fills } => {
+            info!(
+                command_id = request.command_id,
+                order_id = request.order_id,
+                fill_count = fills.len(),
+                "order accepted"
+            );
+            Ok(Json(OrderResponse {
+                accepted: true,
+                fills: fills
+                    .into_iter()
+                    .map(|fill| FillResponse {
+                        maker_order_id: fill.maker_order_id().get(),
+                        taker_order_id: fill.taker_order_id().get(),
+                        price: fill.price().get(),
+                        quantity: fill.quantity().get(),
+                    })
+                    .collect(),
+            }))
+        }
         _ => Err(ApiError::Internal("unexpected order reply")),
     }
 }
@@ -273,10 +322,12 @@ async fn snapshot(
     Path(market_id): Path<String>,
 ) -> Result<Json<SnapshotResponse>, ApiError> {
     if market_id != state.market_id {
+        warn!(requested_market_id = %market_id, configured_market_id = %state.market_id, "unknown market snapshot requested");
         return Err(ApiError::NotFound);
     }
 
     let snapshot = actor_snapshot(&state.actor).await?;
+    info!(market_id = %market_id, event_count = snapshot.event_count, "snapshot returned");
     Ok(Json(SnapshotResponse {
         market_id,
         event_count: snapshot.event_count,
