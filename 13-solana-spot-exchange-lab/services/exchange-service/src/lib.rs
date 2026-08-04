@@ -28,6 +28,8 @@ pub const DATABASE_URL_ENV: &str = "DATABASE_URL";
 #[derive(Clone)]
 pub struct ServiceState {
     market_id: String,
+    boot_mode: ReadyBootMode,
+    journal_mode: JournalMode,
     market: MarketSpec,
     actor: MarketActorHandle,
 }
@@ -56,7 +58,13 @@ impl runtime::EventJournal for PostgresRuntimeJournal {
 pub fn app() -> Router {
     let market = default_market();
     let actor = MarketActorHandle::spawn(market, 1024);
-    app_with_actor(MARKET_SOL_USDC, market, actor)
+    app_with_actor(
+        MARKET_SOL_USDC,
+        ReadyBootMode::Local,
+        JournalMode::Noop,
+        market,
+        actor,
+    )
 }
 
 pub async fn app_from_env() -> Result<Router, StartupError> {
@@ -91,11 +99,19 @@ pub async fn app_with_postgres(database_url: &str) -> Result<Router, StartupErro
     let actor =
         MarketActorHandle::spawn_from_app(exchange, 1024, PostgresRuntimeJournal::new(journal));
 
-    Ok(app_with_actor(MARKET_SOL_USDC, market, actor))
+    Ok(app_with_actor(
+        MARKET_SOL_USDC,
+        ReadyBootMode::Postgres,
+        JournalMode::Postgres,
+        market,
+        actor,
+    ))
 }
 
 pub fn app_with_actor(
     market_id: impl Into<String>,
+    boot_mode: ReadyBootMode,
+    journal_mode: JournalMode,
     market: MarketSpec,
     actor: MarketActorHandle,
 ) -> Router {
@@ -107,6 +123,8 @@ pub fn app_with_actor(
         .route("/markets/{market_id}/snapshot", get(snapshot))
         .with_state(ServiceState {
             market_id: market_id.into(),
+            boot_mode,
+            journal_mode,
             market,
             actor,
         })
@@ -180,6 +198,20 @@ impl BootMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadyBootMode {
+    Local,
+    Postgres,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalMode {
+    Noop,
+    Postgres,
+}
+
 #[derive(Debug)]
 pub enum StartupError {
     Config(String),
@@ -225,6 +257,8 @@ async fn ready(State(state): State<ServiceState>) -> Result<Json<ReadyResponse>,
     Ok(Json(ReadyResponse {
         status: "ready",
         market_id: state.market_id,
+        boot_mode: state.boot_mode,
+        journal_mode: state.journal_mode,
         event_count: snapshot.event_count,
     }))
 }
@@ -419,6 +453,8 @@ pub struct HealthResponse {
 pub struct ReadyResponse {
     pub status: &'static str,
     pub market_id: String,
+    pub boot_mode: ReadyBootMode,
+    pub journal_mode: JournalMode,
     pub event_count: usize,
 }
 
@@ -571,6 +607,8 @@ mod tests {
             json!({
                 "status": "ready",
                 "market_id": "SOL-USDC",
+                "boot_mode": "local",
+                "journal_mode": "noop",
                 "event_count": 0
             })
         );
@@ -709,7 +747,13 @@ mod tests {
             application::ExchangeApplication::replay(market, source.events().iter().cloned())
                 .unwrap();
         let actor = MarketActorHandle::spawn_from_app(replayed, 8, runtime::NoopEventJournal);
-        let service = app_with_actor(MARKET_SOL_USDC, market, actor);
+        let service = app_with_actor(
+            MARKET_SOL_USDC,
+            ReadyBootMode::Local,
+            JournalMode::Noop,
+            market,
+            actor,
+        );
 
         let ready = service
             .clone()
@@ -728,6 +772,8 @@ mod tests {
             json!({
                 "status": "ready",
                 "market_id": "SOL-USDC",
+                "boot_mode": "local",
+                "journal_mode": "noop",
                 "event_count": 1
             })
         );
@@ -776,6 +822,8 @@ mod tests {
         let body = response_json(ready).await;
         assert_eq!(body["status"], "ready");
         assert_eq!(body["market_id"], MARKET_SOL_USDC);
+        assert_eq!(body["boot_mode"], "postgres");
+        assert_eq!(body["journal_mode"], "postgres");
         assert!(body["event_count"].is_number());
     }
 }
