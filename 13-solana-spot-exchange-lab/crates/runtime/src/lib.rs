@@ -4,6 +4,7 @@ use application::{CommandId, ExchangeApplication};
 use async_trait::async_trait;
 use domain::{AssetId, BalanceAmount, Fill, MarketSpec, Order, TraderId};
 use tokio::sync::{mpsc, oneshot};
+use tracing::{error, info, warn};
 
 #[async_trait]
 pub trait EventJournal: Send + 'static {
@@ -155,12 +156,14 @@ async fn run_market_actor(
     mut receiver: mpsc::Receiver<MarketCommand>,
     mut journal: impl EventJournal,
 ) {
+    info!(event_count = app.events().len(), "market actor started");
     while let Some(command) = receiver.recv().await {
         let should_shutdown = handle_command(&mut app, &mut journal, command).await;
         if should_shutdown {
             break;
         }
     }
+    info!(event_count = app.events().len(), "market actor stopped");
 }
 
 async fn handle_command(
@@ -175,36 +178,99 @@ async fn handle_command(
             asset_id,
             amount,
             reply_to,
-        } => match app.credit_deposit_event(command_id, trader_id, asset_id, amount) {
-            Ok(event) => {
-                let (reply, should_shutdown) =
-                    persist_and_apply(app, journal, event, MarketReply::DepositCredited).await;
-                let _ = reply_to.send(reply);
-                should_shutdown
+        } => {
+            info!(
+                command_id = command_id.get(),
+                trader_id = trader_id.get(),
+                asset_id = asset_id.get(),
+                amount = amount.get(),
+                "deposit command received"
+            );
+            match app.credit_deposit_event(command_id, trader_id, asset_id, amount) {
+                Ok(event) => {
+                    let (reply, should_shutdown) =
+                        persist_and_apply(app, journal, event, MarketReply::DepositCredited).await;
+                    match &reply {
+                        Ok(_) => info!(
+                            command_id = command_id.get(),
+                            event_count = app.events().len(),
+                            "deposit command accepted"
+                        ),
+                        Err(error) => warn!(
+                            command_id = command_id.get(),
+                            error = ?error,
+                            "deposit command rejected"
+                        ),
+                    }
+                    let _ = reply_to.send(reply);
+                    should_shutdown
+                }
+                Err(error) => {
+                    warn!(
+                        command_id = command_id.get(),
+                        trader_id = trader_id.get(),
+                        asset_id = asset_id.get(),
+                        error = ?error,
+                        "deposit command rejected"
+                    );
+                    let _ = reply_to.send(Err(error));
+                    false
+                }
             }
-            Err(error) => {
-                let _ = reply_to.send(Err(error));
-                false
-            }
-        },
+        }
         MarketCommand::PlaceOrder {
             command_id,
             order,
             reply_to,
-        } => match app.place_order_event(command_id, order) {
-            Ok((event, fills)) => {
-                let (reply, should_shutdown) =
-                    persist_and_apply(app, journal, event, MarketReply::OrderPlaced { fills })
-                        .await;
-                let _ = reply_to.send(reply);
-                should_shutdown
+        } => {
+            info!(
+                command_id = command_id.get(),
+                order_id = order.id().get(),
+                trader_id = order.trader_id().get(),
+                "order command received"
+            );
+            match app.place_order_event(command_id, order) {
+                Ok((event, fills)) => {
+                    let fill_count = fills.len();
+                    let (reply, should_shutdown) =
+                        persist_and_apply(app, journal, event, MarketReply::OrderPlaced { fills })
+                            .await;
+                    match &reply {
+                        Ok(_) => info!(
+                            command_id = command_id.get(),
+                            order_id = order.id().get(),
+                            fill_count,
+                            event_count = app.events().len(),
+                            "order command accepted"
+                        ),
+                        Err(error) => warn!(
+                            command_id = command_id.get(),
+                            order_id = order.id().get(),
+                            error = ?error,
+                            "order command rejected"
+                        ),
+                    }
+                    let _ = reply_to.send(reply);
+                    should_shutdown
+                }
+                Err(error) => {
+                    warn!(
+                        command_id = command_id.get(),
+                        order_id = order.id().get(),
+                        trader_id = order.trader_id().get(),
+                        error = ?error,
+                        "order command rejected"
+                    );
+                    let _ = reply_to.send(Err(error));
+                    false
+                }
             }
-            Err(error) => {
-                let _ = reply_to.send(Err(error));
-                false
-            }
-        },
+        }
         MarketCommand::Snapshot { reply_to } => {
+            info!(
+                event_count = app.events().len(),
+                "snapshot command received"
+            );
             let reply = Ok(MarketReply::Snapshot(MarketSnapshot {
                 event_count: app.events().len(),
             }));
@@ -212,6 +278,10 @@ async fn handle_command(
             false
         }
         MarketCommand::Shutdown { reply_to } => {
+            info!(
+                event_count = app.events().len(),
+                "shutdown command received"
+            );
             let _ = reply_to.send(Ok(MarketReply::Shutdown));
             true
         }
@@ -225,12 +295,19 @@ async fn persist_and_apply(
     success_reply: MarketReply,
 ) -> (application::Result<MarketReply>, bool) {
     if journal.append(&event).await.is_err() {
+        error!(
+            command_id = event.command_id().get(),
+            "journal append failed"
+        );
         return (Err(application::Error::JournalAppendFailed), false);
     }
 
     match app.apply_event(event) {
         Ok(()) => (Ok(success_reply), false),
-        Err(error) => (Err(error), true),
+        Err(error) => {
+            error!(error = ?error, "event apply failed after journal append");
+            (Err(error), true)
+        }
     }
 }
 

@@ -9,6 +9,7 @@ application.workspace = true
 async-trait.workspace = true
 domain.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
