@@ -1,12 +1,17 @@
 #![forbid(unsafe_code)]
 
 use core::fmt;
-use std::env;
+use std::{
+    env,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use async_trait::async_trait;
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    body::Body,
+    extract::{Extension, Path, State},
+    http::{HeaderValue, Request, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -24,6 +29,31 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber};
 const MARKET_SOL_USDC: &str = "SOL-USDC";
 pub const EXCHANGE_BOOT_MODE_ENV: &str = "EXCHANGE_BOOT_MODE";
 pub const DATABASE_URL_ENV: &str = "DATABASE_URL";
+pub const X_REQUEST_ID_HEADER: &str = "x-request-id";
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestId(String);
+
+impl RequestId {
+    fn generated() -> Self {
+        let counter = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self(format!("req-{}-{counter}", std::process::id()))
+    }
+
+    fn from_header(value: &HeaderValue) -> Option<Self> {
+        value
+            .to_str()
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(|value| Self(value.to_owned()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 #[derive(Clone)]
 pub struct ServiceState {
@@ -121,6 +151,7 @@ pub fn app_with_actor(
         .route("/deposits", post(credit_deposit))
         .route("/orders", post(place_order))
         .route("/markets/{market_id}/snapshot", get(snapshot))
+        .layer(middleware::from_fn(request_id_middleware))
         .with_state(ServiceState {
             market_id: market_id.into(),
             boot_mode,
@@ -243,13 +274,35 @@ impl fmt::Display for StartupError {
 
 impl std::error::Error for StartupError {}
 
-async fn health() -> Json<HealthResponse> {
+async fn request_id_middleware(mut request: Request<Body>, next: Next) -> Response {
+    let request_id = request
+        .headers()
+        .get(X_REQUEST_ID_HEADER)
+        .and_then(RequestId::from_header)
+        .unwrap_or_else(RequestId::generated);
+    request.extensions_mut().insert(request_id.clone());
+
+    let mut response = next.run(request).await;
+    if let Ok(header_value) = HeaderValue::from_str(request_id.as_str()) {
+        response
+            .headers_mut()
+            .insert(X_REQUEST_ID_HEADER, header_value);
+    }
+    response
+}
+
+async fn health(Extension(request_id): Extension<RequestId>) -> Json<HealthResponse> {
+    info!(request_id = %request_id.as_str(), "health checked");
     Json(HealthResponse { status: "ok" })
 }
 
-async fn ready(State(state): State<ServiceState>) -> Result<Json<ReadyResponse>, ApiError> {
+async fn ready(
+    State(state): State<ServiceState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Result<Json<ReadyResponse>, ApiError> {
     let snapshot = actor_snapshot(&state.actor).await?;
     info!(
+        request_id = %request_id.as_str(),
         market_id = %state.market_id,
         event_count = snapshot.event_count,
         "readiness checked"
@@ -265,9 +318,11 @@ async fn ready(State(state): State<ServiceState>) -> Result<Json<ReadyResponse>,
 
 async fn credit_deposit(
     State(state): State<ServiceState>,
+    Extension(request_id): Extension<RequestId>,
     Json(request): Json<DepositRequest>,
 ) -> Result<Json<DepositResponse>, ApiError> {
     info!(
+        request_id = %request_id.as_str(),
         command_id = request.command_id,
         trader_id = request.trader_id,
         asset_id = request.asset_id,
@@ -286,7 +341,11 @@ async fn credit_deposit(
 
     match reply {
         MarketReply::DepositCredited => {
-            info!(command_id = request.command_id, "credit deposit accepted");
+            info!(
+                request_id = %request_id.as_str(),
+                command_id = request.command_id,
+                "credit deposit accepted"
+            );
             Ok(Json(DepositResponse { accepted: true }))
         }
         _ => Err(ApiError::Internal("unexpected deposit reply")),
@@ -295,9 +354,11 @@ async fn credit_deposit(
 
 async fn place_order(
     State(state): State<ServiceState>,
+    Extension(request_id): Extension<RequestId>,
     Json(request): Json<OrderRequest>,
 ) -> Result<Json<OrderResponse>, ApiError> {
     info!(
+        request_id = %request_id.as_str(),
         command_id = request.command_id,
         order_id = request.order_id,
         trader_id = request.trader_id,
@@ -329,6 +390,7 @@ async fn place_order(
     match reply {
         MarketReply::OrderPlaced { fills } => {
             info!(
+                request_id = %request_id.as_str(),
                 command_id = request.command_id,
                 order_id = request.order_id,
                 fill_count = fills.len(),
@@ -353,15 +415,26 @@ async fn place_order(
 
 async fn snapshot(
     State(state): State<ServiceState>,
+    Extension(request_id): Extension<RequestId>,
     Path(market_id): Path<String>,
 ) -> Result<Json<SnapshotResponse>, ApiError> {
     if market_id != state.market_id {
-        warn!(requested_market_id = %market_id, configured_market_id = %state.market_id, "unknown market snapshot requested");
+        warn!(
+            request_id = %request_id.as_str(),
+            requested_market_id = %market_id,
+            configured_market_id = %state.market_id,
+            "unknown market snapshot requested"
+        );
         return Err(ApiError::NotFound);
     }
 
     let snapshot = actor_snapshot(&state.actor).await?;
-    info!(market_id = %market_id, event_count = snapshot.event_count, "snapshot returned");
+    info!(
+        request_id = %request_id.as_str(),
+        market_id = %market_id,
+        event_count = snapshot.event_count,
+        "snapshot returned"
+    );
     Ok(Json(SnapshotResponse {
         market_id,
         event_count: snapshot.event_count,
@@ -532,6 +605,50 @@ mod tests {
     async fn response_json(response: axum::response::Response) -> Value {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn request_id_header_is_echoed() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .header(X_REQUEST_ID_HEADER, "test-request-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(X_REQUEST_ID_HEADER).unwrap(),
+            "test-request-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_id_header_is_generated_when_missing() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let request_id = response
+            .headers()
+            .get(X_REQUEST_ID_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(request_id.starts_with("req-"));
     }
 
     #[test]
