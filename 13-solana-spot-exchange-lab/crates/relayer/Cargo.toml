@@ -1,0 +1,17 @@
+[package]
+name = "relayer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anchor-lang.workspace = true
+settlement_client.workspace = true
+spot_settlement = { path = "../../programs/spot-settlement", features = ["no-entrypoint"] }
+
+[dev-dependencies]
+solana-compute-budget-interface.workspace = true
+solana-sdk-ids.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
