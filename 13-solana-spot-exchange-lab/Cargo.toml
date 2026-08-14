@@ -11,6 +11,7 @@ axum = "0.8.4"
 domain = { path = "crates/domain" }
 persistence = { path = "crates/persistence" }
 litesvm = { version = "0.10.0", features = ["precompiles"] }
+relayer = { path = "crates/relayer" }
 runtime = { path = "crates/runtime" }
 settlement_client = { path = "crates/settlement_client" }
 serde = "1.0.228"

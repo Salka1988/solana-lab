@@ -2,12 +2,14 @@
 
 use core::fmt;
 use std::{
+    collections::BTreeMap,
     env,
     net::SocketAddr,
     sync::atomic::{AtomicU64, Ordering},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
+use anchor_lang::prelude::Pubkey;
 use async_trait::async_trait;
 use axum::{
     body::Body,
@@ -67,8 +69,91 @@ pub struct ServiceState {
     journal_mode: JournalMode,
     market: MarketSpec,
     actor: MarketActorHandle,
+    settlement: SettlementEdgeState,
     metrics: ServiceMetrics,
     api_key: Option<String>,
+    settlement_config: Option<SettlementBridgeConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettlementBridgeConfig {
+    pub market_id: MarketId,
+    pub settlement_authority: Pubkey,
+    pub base_mint: Pubkey,
+    pub quote_mint: Pubkey,
+    pub payer: Pubkey,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SettlementEdgeState {
+    inner: Arc<SettlementEdgeStateInner>,
+}
+
+#[derive(Debug, Default)]
+struct SettlementEdgeStateInner {
+    signed_orders: Mutex<BTreeMap<OrderId, relayer::SettlementSignedOrder>>,
+    queued_requests: Mutex<Vec<relayer::SignedSettlementRequest>>,
+    next_settlement_id: AtomicU64,
+}
+
+impl SettlementEdgeState {
+    fn store_signed_order(
+        &self,
+        order_id: OrderId,
+        signed_order: relayer::SettlementSignedOrder,
+    ) -> bool {
+        self.inner
+            .signed_orders
+            .lock()
+            .expect("signed order store poisoned")
+            .insert(order_id, signed_order)
+            .is_some()
+    }
+
+    pub fn allocate_settlement_ids(&self, count: usize) -> Result<Option<u64>, ApiError> {
+        if count == 0 {
+            return Ok(None);
+        }
+
+        let count = u64::try_from(count)
+            .map_err(|_| ApiError::Internal("settlement id allocation overflow"))?;
+        let first = self
+            .inner
+            .next_settlement_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(count)
+            })
+            .map_err(|_| ApiError::Internal("settlement id allocation overflow"))?;
+
+        Ok(Some(first))
+    }
+
+    fn queue_settlement_requests(&self, requests: Vec<relayer::SignedSettlementRequest>) {
+        self.inner
+            .queued_requests
+            .lock()
+            .expect("settlement request queue poisoned")
+            .extend(requests);
+    }
+
+    fn queued_settlement_count(&self) -> usize {
+        self.inner
+            .queued_requests
+            .lock()
+            .expect("settlement request queue poisoned")
+            .len()
+    }
+}
+
+impl relayer::SettlementSignedOrderSource for SettlementEdgeState {
+    fn signed_order(&self, order_id: OrderId) -> Option<relayer::SettlementSignedOrder> {
+        self.inner
+            .signed_orders
+            .lock()
+            .expect("signed order store poisoned")
+            .get(&order_id)
+            .copied()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -258,6 +343,26 @@ pub fn app_with_actor_and_api_key(
     actor: MarketActorHandle,
     api_key: Option<String>,
 ) -> Router {
+    app_with_actor_api_key_and_settlement(
+        market_id,
+        boot_mode,
+        journal_mode,
+        market,
+        actor,
+        api_key,
+        None,
+    )
+}
+
+pub fn app_with_actor_api_key_and_settlement(
+    market_id: impl Into<String>,
+    boot_mode: ReadyBootMode,
+    journal_mode: JournalMode,
+    market: MarketSpec,
+    actor: MarketActorHandle,
+    api_key: Option<String>,
+    settlement_config: Option<SettlementBridgeConfig>,
+) -> Router {
     let metrics = ServiceMetrics::default();
     Router::new()
         .route("/health", get(health))
@@ -266,6 +371,8 @@ pub fn app_with_actor_and_api_key(
         .route("/metrics.json", get(metrics_json_endpoint))
         .route("/deposits", post(credit_deposit))
         .route("/orders", post(place_order))
+        .route("/signed-orders", post(register_signed_order))
+        .route("/settlements/pending", get(pending_settlements))
         .route("/markets/{market_id}/snapshot", get(snapshot))
         .layer(middleware::from_fn_with_state(
             metrics.clone(),
@@ -278,8 +385,10 @@ pub fn app_with_actor_and_api_key(
             journal_mode,
             market,
             actor,
+            settlement: SettlementEdgeState::default(),
             metrics,
             api_key,
+            settlement_config,
         })
 }
 
@@ -587,6 +696,7 @@ async fn place_order(
     match reply {
         MarketReply::OrderPlaced { fills } => {
             state.metrics.record_order_accepted();
+            queue_settlement_requests(&state, request.command_id, order, &fills, &request_id);
             info!(
                 request_id = %request_id.as_str(),
                 command_id = request.command_id,
@@ -609,6 +719,127 @@ async fn place_order(
         }
         _ => Err(ApiError::Internal("unexpected order reply")),
     }
+}
+
+fn queue_settlement_requests(
+    state: &ServiceState,
+    command_id: u128,
+    taker_order: Order,
+    fills: &[domain::Fill],
+    request_id: &RequestId,
+) {
+    let Some(config) = state.settlement_config else {
+        return;
+    };
+    if fills.is_empty() {
+        return;
+    }
+
+    let Ok(Some(first_settlement_id)) = state.settlement.allocate_settlement_ids(fills.len())
+    else {
+        warn!(
+            request_id = %request_id.as_str(),
+            command_id,
+            fill_count = fills.len(),
+            "settlement id allocation failed"
+        );
+        return;
+    };
+    let Ok(command_id) = application::CommandId::new(command_id) else {
+        warn!(
+            request_id = %request_id.as_str(),
+            "settlement batch command id was invalid"
+        );
+        return;
+    };
+
+    let batch = application::SettlementBatch::from_order_fills(command_id, taker_order, fills);
+    let bridge = relayer::ApplicationSettlementBridge::new(
+        config.market_id,
+        config.settlement_authority,
+        config.base_mint,
+        config.quote_mint,
+        config.payer,
+    );
+
+    match bridge.requests_from_batch(&batch, &state.settlement, first_settlement_id) {
+        Ok(requests) => {
+            let settlement_count = requests.len();
+            state.settlement.queue_settlement_requests(requests);
+            info!(
+                request_id = %request_id.as_str(),
+                settlement_count,
+                first_settlement_id,
+                "settlement requests queued"
+            );
+        }
+        Err(error) => {
+            warn!(
+                request_id = %request_id.as_str(),
+                error = ?error,
+                "settlement request bridging skipped"
+            );
+        }
+    }
+}
+
+async fn register_signed_order(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(request): Json<SignedOrderRequest>,
+) -> Result<Json<SignedOrderResponse>, ApiError> {
+    authorize_api_key(&state, &headers).map_err(|error| record_api_error(error, &state.metrics))?;
+
+    let order_id =
+        order_id(request.order_id).map_err(|error| record_api_error(error, &state.metrics))?;
+    let trader_id =
+        trader_id(request.trader_id).map_err(|error| record_api_error(error, &state.metrics))?;
+    let order_id_u64 = u64::try_from(order_id.get()).map_err(|_| {
+        record_api_error(
+            ApiError::BadRequest("order_id exceeds u64".to_owned()),
+            &state.metrics,
+        )
+    })?;
+    let order_hash = bytes32(request.order_hash, "order_hash")
+        .map_err(|error| record_api_error(error, &state.metrics))?;
+    let trader = pubkey_from_bytes(request.trader_pubkey, "trader_pubkey")
+        .map_err(|error| record_api_error(error, &state.metrics))?;
+    let market_config = pubkey_from_bytes(request.market_config, "market_config")
+        .map_err(|error| record_api_error(error, &state.metrics))?;
+    let signature = bytes64(request.signature, "signature")
+        .map_err(|error| record_api_error(error, &state.metrics))?;
+
+    let replaced = state.settlement.store_signed_order(
+        order_id,
+        relayer::SettlementSignedOrder {
+            trader_id,
+            order_hash,
+            order: spot_settlement::SignedOrderPayload {
+                order_id: order_id_u64,
+                market_config,
+                trader,
+                side: signed_order_side(request.side),
+                price: request.price,
+                quantity: request.quantity,
+                nonce: request.nonce,
+                expiry_slot: request.expiry_slot,
+            },
+            signature,
+        },
+    );
+
+    Ok(Json(SignedOrderResponse {
+        accepted: true,
+        replaced,
+    }))
+}
+
+async fn pending_settlements(
+    State(state): State<ServiceState>,
+) -> Json<PendingSettlementsResponse> {
+    Json(PendingSettlementsResponse {
+        queued: state.settlement.queued_settlement_count(),
+    })
 }
 
 async fn snapshot(
@@ -698,6 +929,29 @@ fn side(value: OrderSideDto) -> Result<Side, ApiError> {
     }
 }
 
+fn signed_order_side(value: OrderSideDto) -> spot_settlement::SignedOrderSide {
+    match value {
+        OrderSideDto::Bid => spot_settlement::SignedOrderSide::Bid,
+        OrderSideDto::Ask => spot_settlement::SignedOrderSide::Ask,
+    }
+}
+
+fn pubkey_from_bytes(value: Vec<u8>, field: &'static str) -> Result<Pubkey, ApiError> {
+    bytes32(value, field).map(Pubkey::new_from_array)
+}
+
+fn bytes32(value: Vec<u8>, field: &'static str) -> Result<[u8; 32], ApiError> {
+    value
+        .try_into()
+        .map_err(|_| ApiError::BadRequest(format!("{field} must contain 32 bytes")))
+}
+
+fn bytes64(value: Vec<u8>, field: &'static str) -> Result<[u8; 64], ApiError> {
+    value
+        .try_into()
+        .map_err(|_| ApiError::BadRequest(format!("{field} must contain 64 bytes")))
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct DepositRequest {
     pub command_id: u128,
@@ -721,6 +975,32 @@ pub struct OrderRequest {
     pub price: u64,
     pub quantity: u64,
     pub sequence: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SignedOrderRequest {
+    pub order_id: u128,
+    pub trader_id: u64,
+    pub order_hash: Vec<u8>,
+    pub trader_pubkey: Vec<u8>,
+    pub market_config: Vec<u8>,
+    pub side: OrderSideDto,
+    pub price: u64,
+    pub quantity: u64,
+    pub nonce: u64,
+    pub expiry_slot: u64,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct SignedOrderResponse {
+    pub accepted: bool,
+    pub replaced: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct PendingSettlementsResponse {
+    pub queued: usize,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -942,6 +1222,31 @@ mod tests {
     async fn response_text(response: axum::response::Response) -> String {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn signed_order_body(
+        order_id: u128,
+        trader_id: u64,
+        order_hash: [u8; 32],
+        trader_pubkey: [u8; 32],
+        market_config: Pubkey,
+        side: &str,
+        price: u64,
+        quantity: u64,
+    ) -> Value {
+        json!({
+            "order_id": order_id,
+            "trader_id": trader_id,
+            "order_hash": Vec::from(order_hash),
+            "trader_pubkey": Vec::from(trader_pubkey),
+            "market_config": Vec::from(market_config.to_bytes()),
+            "side": side,
+            "price": price,
+            "quantity": quantity,
+            "nonce": order_id,
+            "expiry_slot": u64::MAX,
+            "signature": vec![trader_id as u8; 64]
+        })
     }
 
     #[tokio::test]
@@ -1166,6 +1471,226 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response_json(response).await, json!({"accepted": true}));
+    }
+
+    #[test]
+    fn settlement_edge_allocates_contiguous_ids_and_stores_signed_orders() {
+        let settlement = SettlementEdgeState::default();
+        let order_id = OrderId::new(1).unwrap();
+        let signed_order = relayer::SettlementSignedOrder {
+            trader_id: TraderId::new(2).unwrap(),
+            order_hash: [3; 32],
+            order: spot_settlement::SignedOrderPayload {
+                order_id: 1,
+                market_config: Pubkey::new_from_array([4; 32]),
+                trader: Pubkey::new_from_array([5; 32]),
+                side: spot_settlement::SignedOrderSide::Bid,
+                price: 100,
+                quantity: 7,
+                nonce: 9,
+                expiry_slot: 10,
+            },
+            signature: [6; 64],
+        };
+
+        assert!(!settlement.store_signed_order(order_id, signed_order));
+        assert_eq!(
+            relayer::SettlementSignedOrderSource::signed_order(&settlement, order_id),
+            Some(signed_order)
+        );
+        assert_eq!(settlement.allocate_settlement_ids(0).unwrap(), None);
+        assert_eq!(settlement.allocate_settlement_ids(2).unwrap(), Some(0));
+        assert_eq!(settlement.allocate_settlement_ids(3).unwrap(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn signed_order_registration_accepts_and_replaces_order() {
+        let service = app();
+        let body = json!({
+            "order_id": 1,
+            "trader_id": 2,
+            "order_hash": vec![3; 32],
+            "trader_pubkey": vec![4; 32],
+            "market_config": vec![5; 32],
+            "side": "bid",
+            "price": 100,
+            "quantity": 7,
+            "nonce": 9,
+            "expiry_slot": 10,
+            "signature": vec![6; 64]
+        });
+
+        let first = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/signed-orders")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(first).await,
+            json!({"accepted": true, "replaced": false})
+        );
+
+        let second = service
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/signed-orders")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(second).await,
+            json!({"accepted": true, "replaced": true})
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_order_registration_rejects_wrong_byte_lengths() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/signed-orders")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "order_id": 1,
+                            "trader_id": 2,
+                            "order_hash": vec![3; 31],
+                            "trader_pubkey": vec![4; 32],
+                            "market_config": vec![5; 32],
+                            "side": "bid",
+                            "price": 100,
+                            "quantity": 7,
+                            "nonce": 9,
+                            "expiry_slot": 10,
+                            "signature": vec![6; 64]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(response).await,
+            json!({"error": "order_hash must contain 32 bytes"})
+        );
+    }
+
+    #[tokio::test]
+    async fn crossing_order_with_signed_orders_queues_settlement() {
+        let market = default_market();
+        let actor = MarketActorHandle::spawn(market, 1024);
+        let base_mint = Pubkey::new_from_array([11; 32]);
+        let quote_mint = Pubkey::new_from_array([12; 32]);
+        let market_config = settlement_client::market_config_pda(base_mint, quote_mint).0;
+        let service = app_with_actor_api_key_and_settlement(
+            MARKET_SOL_USDC,
+            ReadyBootMode::Local,
+            JournalMode::Noop,
+            market,
+            actor,
+            None,
+            Some(SettlementBridgeConfig {
+                market_id: MarketId::new(1).unwrap(),
+                settlement_authority: Pubkey::new_from_array([8; 32]),
+                base_mint,
+                quote_mint,
+                payer: Pubkey::new_from_array([9; 32]),
+            }),
+        );
+
+        for body in [
+            json!({ "command_id": 1, "trader_id": 1, "asset_id": 1, "amount": 7 }),
+            json!({ "command_id": 2, "trader_id": 2, "asset_id": 2, "amount": 735 }),
+            signed_order_body(1, 1, [1; 32], [21; 32], market_config, "ask", 100, 7),
+            signed_order_body(2, 2, [2; 32], [22; 32], market_config, "bid", 105, 7),
+        ] {
+            let uri = if body.get("asset_id").is_some() {
+                "/deposits"
+            } else {
+                "/signed-orders"
+            };
+            let response = service
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        for body in [
+            json!({
+                "command_id": 3,
+                "order_id": 1,
+                "trader_id": 1,
+                "market_id": 1,
+                "side": "ask",
+                "price": 100,
+                "quantity": 7,
+                "sequence": 1
+            }),
+            json!({
+                "command_id": 4,
+                "order_id": 2,
+                "trader_id": 2,
+                "market_id": 1,
+                "side": "bid",
+                "price": 105,
+                "quantity": 7,
+                "sequence": 2
+            }),
+        ] {
+            let response = service
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/orders")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let pending = service
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/settlements/pending")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(pending.status(), StatusCode::OK);
+        assert_eq!(response_json(pending).await, json!({ "queued": 1 }));
     }
 
     #[tokio::test]
