@@ -31,6 +31,7 @@ pub struct SubmittedTransaction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmissionError {
+    BlockhashExpired(String),
     BlockhashUnavailable(String),
     BuildTransaction(String),
     MissingRequiredSigner(Pubkey),
@@ -44,6 +45,17 @@ pub trait SolanaSubmitter {
         &mut self,
         plan: InstructionPlan,
     ) -> Result<SubmittedTransaction, SubmissionError>;
+}
+
+const DEFAULT_MAX_SUBMIT_ATTEMPTS: usize = 3;
+
+fn retryable_submission_error(error: &SubmissionError) -> bool {
+    matches!(
+        error,
+        SubmissionError::BlockhashExpired(_)
+            | SubmissionError::BlockhashUnavailable(_)
+            | SubmissionError::Uncertain(_)
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +101,59 @@ pub trait TransactionConfirmer {
     ) -> Result<ConfirmationStatus, SubmissionError>;
 }
 
+#[async_trait]
+pub trait ConfirmationPoller {
+    async fn poll(
+        &mut self,
+        signature: TransactionSignature,
+    ) -> Result<ConfirmationStatus, SubmissionError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollingPolicy {
+    pub max_polls: usize,
+}
+
+impl Default for PollingPolicy {
+    fn default() -> Self {
+        Self { max_polls: 20 }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PollingConfirmer<P> {
+    poller: P,
+    policy: PollingPolicy,
+}
+
+impl<P> PollingConfirmer<P> {
+    pub const fn new(poller: P, policy: PollingPolicy) -> Self {
+        Self { poller, policy }
+    }
+}
+
+#[async_trait]
+impl<P> TransactionConfirmer for PollingConfirmer<P>
+where
+    P: ConfirmationPoller + Send,
+{
+    async fn confirm(
+        &mut self,
+        signature: TransactionSignature,
+    ) -> Result<ConfirmationStatus, SubmissionError> {
+        for _ in 0..self.policy.max_polls {
+            match self.poller.poll(signature).await? {
+                ConfirmationStatus::Uncertain(_) => {}
+                status => return Ok(status),
+            }
+        }
+
+        Ok(ConfirmationStatus::Uncertain(
+            "confirmation polling exhausted".to_string(),
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmingSubmitter<S, C> {
     submitter: S,
@@ -120,6 +185,130 @@ where
             ConfirmationStatus::Confirmed => Ok(submitted),
             ConfirmationStatus::Failed(error) => Err(SubmissionError::Rejected(error)),
             ConfirmationStatus::Uncertain(error) => Err(SubmissionError::Uncertain(error)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    pub max_attempts: usize,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: DEFAULT_MAX_SUBMIT_ATTEMPTS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryingSubmitter<S> {
+    submitter: S,
+    policy: RetryPolicy,
+}
+
+impl<S> RetryingSubmitter<S> {
+    pub const fn new(submitter: S, policy: RetryPolicy) -> Self {
+        Self { submitter, policy }
+    }
+}
+
+#[async_trait]
+impl<S> SolanaSubmitter for RetryingSubmitter<S>
+where
+    S: SolanaSubmitter + Send,
+{
+    async fn submit(
+        &mut self,
+        plan: InstructionPlan,
+    ) -> Result<SubmittedTransaction, SubmissionError> {
+        let max_attempts = self.policy.max_attempts.max(1);
+        let mut last_error = None;
+
+        for _ in 0..max_attempts {
+            match self.submitter.submit(plan.clone()).await {
+                Ok(submitted) => return Ok(submitted),
+                Err(error) if retryable_submission_error(&error) => {
+                    last_error = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(last_error
+            .unwrap_or_else(|| SubmissionError::Uncertain("retry attempts exhausted".to_string())))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadLetter {
+    pub plan: InstructionPlan,
+    pub error: SubmissionError,
+}
+
+#[async_trait]
+pub trait DeadLetterSink {
+    async fn record(&mut self, dead_letter: DeadLetter) -> Result<(), SubmissionError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingDeadLetterSink {
+    pub dead_letters: Vec<DeadLetter>,
+}
+
+impl RecordingDeadLetterSink {
+    pub const fn new() -> Self {
+        Self {
+            dead_letters: Vec::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl DeadLetterSink for RecordingDeadLetterSink {
+    async fn record(&mut self, dead_letter: DeadLetter) -> Result<(), SubmissionError> {
+        self.dead_letters.push(dead_letter);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadLetteringSubmitter<S, D> {
+    submitter: S,
+    dead_letters: D,
+}
+
+impl<S, D> DeadLetteringSubmitter<S, D> {
+    pub const fn new(submitter: S, dead_letters: D) -> Self {
+        Self {
+            submitter,
+            dead_letters,
+        }
+    }
+}
+
+#[async_trait]
+impl<S, D> SolanaSubmitter for DeadLetteringSubmitter<S, D>
+where
+    S: SolanaSubmitter + Send,
+    D: DeadLetterSink + Send,
+{
+    async fn submit(
+        &mut self,
+        plan: InstructionPlan,
+    ) -> Result<SubmittedTransaction, SubmissionError> {
+        match self.submitter.submit(plan.clone()).await {
+            Ok(submitted) => Ok(submitted),
+            Err(error) => {
+                self.dead_letters
+                    .record(DeadLetter {
+                        plan,
+                        error: error.clone(),
+                    })
+                    .await?;
+                Err(error)
+            }
         }
     }
 }
@@ -472,6 +661,64 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SequenceSubmitter {
+        results: Vec<Result<SubmittedTransaction, SubmissionError>>,
+        submitted_plans: Vec<InstructionPlan>,
+    }
+
+    impl SequenceSubmitter {
+        const fn new(results: Vec<Result<SubmittedTransaction, SubmissionError>>) -> Self {
+            Self {
+                results,
+                submitted_plans: Vec::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SolanaSubmitter for SequenceSubmitter {
+        async fn submit(
+            &mut self,
+            plan: InstructionPlan,
+        ) -> Result<SubmittedTransaction, SubmissionError> {
+            self.submitted_plans.push(plan);
+            if self.results.is_empty() {
+                return Err(SubmissionError::Uncertain("no sequence result".to_string()));
+            }
+            self.results.remove(0)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SequencePoller {
+        results: Vec<Result<ConfirmationStatus, SubmissionError>>,
+        polled_signatures: Vec<TransactionSignature>,
+    }
+
+    impl SequencePoller {
+        const fn new(results: Vec<Result<ConfirmationStatus, SubmissionError>>) -> Self {
+            Self {
+                results,
+                polled_signatures: Vec::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ConfirmationPoller for SequencePoller {
+        async fn poll(
+            &mut self,
+            signature: TransactionSignature,
+        ) -> Result<ConfirmationStatus, SubmissionError> {
+            self.polled_signatures.push(signature);
+            if self.results.is_empty() {
+                return Err(SubmissionError::Uncertain("no poll result".to_string()));
+            }
+            self.results.remove(0)
+        }
+    }
+
     fn pubkey(byte: u8) -> Pubkey {
         Pubkey::new_from_array([byte; 32])
     }
@@ -529,6 +776,25 @@ mod tests {
             seller_order,
             seller_signature: [7; 64],
         }
+    }
+
+    fn cancel_plan() -> InstructionPlan {
+        let base_mint = pubkey(11);
+        let quote_mint = pubkey(12);
+        let market_config = settlement_client::market_config_pda(base_mint, quote_mint).0;
+
+        SettlementInstructionPlanner::default().plan_cancel_signed_order(CancelSignedOrderRequest {
+            trader: pubkey(2),
+            base_mint,
+            quote_mint,
+            payer: pubkey(2),
+            order_hash: [9; 32],
+            order: signed_order(
+                market_config,
+                pubkey(2),
+                spot_settlement::SignedOrderSide::Bid,
+            ),
+        })
     }
 
     #[test]
@@ -784,6 +1050,142 @@ mod tests {
 
         assert_eq!(error, SubmissionError::Rejected("rpc rejected".to_string()));
         assert!(submitter.confirmer.confirmed_signatures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn polling_confirmer_polls_until_confirmed() {
+        let mut confirmer = PollingConfirmer::new(
+            SequencePoller::new(vec![
+                Ok(ConfirmationStatus::Uncertain("not found".to_string())),
+                Ok(ConfirmationStatus::Confirmed),
+            ]),
+            PollingPolicy { max_polls: 3 },
+        );
+
+        let status = confirmer.confirm([60; 64]).await.unwrap();
+
+        assert_eq!(status, ConfirmationStatus::Confirmed);
+        assert_eq!(confirmer.poller.polled_signatures, vec![[60; 64], [60; 64]]);
+    }
+
+    #[tokio::test]
+    async fn polling_confirmer_stops_on_failed_status() {
+        let mut confirmer = PollingConfirmer::new(
+            SequencePoller::new(vec![Ok(ConfirmationStatus::Failed(
+                "execution failed".to_string(),
+            ))]),
+            PollingPolicy { max_polls: 3 },
+        );
+
+        let status = confirmer.confirm([61; 64]).await.unwrap();
+
+        assert_eq!(
+            status,
+            ConfirmationStatus::Failed("execution failed".to_string())
+        );
+        assert_eq!(confirmer.poller.polled_signatures, vec![[61; 64]]);
+    }
+
+    #[tokio::test]
+    async fn polling_confirmer_reports_uncertain_after_exhaustion() {
+        let mut confirmer = PollingConfirmer::new(
+            SequencePoller::new(vec![
+                Ok(ConfirmationStatus::Uncertain("not found".to_string())),
+                Ok(ConfirmationStatus::Uncertain("not found".to_string())),
+            ]),
+            PollingPolicy { max_polls: 2 },
+        );
+
+        let status = confirmer.confirm([62; 64]).await.unwrap();
+
+        assert_eq!(
+            status,
+            ConfirmationStatus::Uncertain("confirmation polling exhausted".to_string())
+        );
+        assert_eq!(confirmer.poller.polled_signatures, vec![[62; 64], [62; 64]]);
+    }
+
+    #[tokio::test]
+    async fn retrying_submitter_retries_blockhash_expiry_with_fresh_submission() {
+        let plan = cancel_plan();
+        let mut submitter = RetryingSubmitter::new(
+            SequenceSubmitter::new(vec![
+                Err(SubmissionError::BlockhashExpired("expired".to_string())),
+                Ok(SubmittedTransaction {
+                    signature: [63; 64],
+                }),
+            ]),
+            RetryPolicy { max_attempts: 2 },
+        );
+
+        let submitted = submitter.submit(plan.clone()).await.unwrap();
+
+        assert_eq!(submitted.signature, [63; 64]);
+        assert_eq!(
+            submitter.submitter.submitted_plans,
+            vec![plan.clone(), plan]
+        );
+    }
+
+    #[tokio::test]
+    async fn retrying_submitter_does_not_retry_rejected_submission() {
+        let plan = cancel_plan();
+        let mut submitter = RetryingSubmitter::new(
+            SequenceSubmitter::new(vec![Err(SubmissionError::Rejected(
+                "signature failure".to_string(),
+            ))]),
+            RetryPolicy { max_attempts: 3 },
+        );
+
+        let error = submitter.submit(plan.clone()).await.unwrap_err();
+
+        assert_eq!(
+            error,
+            SubmissionError::Rejected("signature failure".to_string())
+        );
+        assert_eq!(submitter.submitter.submitted_plans, vec![plan]);
+    }
+
+    #[tokio::test]
+    async fn retrying_submitter_returns_last_retryable_error_after_exhaustion() {
+        let plan = cancel_plan();
+        let mut submitter = RetryingSubmitter::new(
+            SequenceSubmitter::new(vec![
+                Err(SubmissionError::BlockhashUnavailable(
+                    "rpc unavailable".to_string(),
+                )),
+                Err(SubmissionError::Uncertain("timeout".to_string())),
+            ]),
+            RetryPolicy { max_attempts: 2 },
+        );
+
+        let error = submitter.submit(plan.clone()).await.unwrap_err();
+
+        assert_eq!(error, SubmissionError::Uncertain("timeout".to_string()));
+        assert_eq!(
+            submitter.submitter.submitted_plans,
+            vec![plan.clone(), plan]
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_lettering_submitter_records_failed_submission() {
+        let plan = cancel_plan();
+        let mut submitter = DeadLetteringSubmitter::new(
+            FailingSubmitter(SubmissionError::Uncertain("timeout".to_string())),
+            RecordingDeadLetterSink::new(),
+        );
+
+        let error = submitter.submit(plan.clone()).await.unwrap_err();
+
+        assert_eq!(error, SubmissionError::Uncertain("timeout".to_string()));
+        assert_eq!(
+            submitter.dead_letters.dead_letters,
+            vec![DeadLetter {
+                plan,
+                error: SubmissionError::Uncertain("timeout".to_string()),
+            }]
+        );
     }
 
     #[tokio::test]
