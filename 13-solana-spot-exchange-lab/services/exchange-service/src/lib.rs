@@ -3,6 +3,7 @@
 use core::fmt;
 use std::{
     env,
+    net::SocketAddr,
     sync::atomic::{AtomicU64, Ordering},
     sync::Arc,
 };
@@ -29,6 +30,7 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 const MARKET_SOL_USDC: &str = "SOL-USDC";
 pub const EXCHANGE_BOOT_MODE_ENV: &str = "EXCHANGE_BOOT_MODE";
+pub const EXCHANGE_HTTP_ADDR_ENV: &str = "EXCHANGE_HTTP_ADDR";
 pub const DATABASE_URL_ENV: &str = "DATABASE_URL";
 pub const X_REQUEST_ID_HEADER: &str = "x-request-id";
 
@@ -260,6 +262,17 @@ pub fn init_tracing() {
         .with_target(false)
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
+}
+
+pub fn http_addr_from_env() -> Result<SocketAddr, StartupError> {
+    http_addr_from_value(env::var(EXCHANGE_HTTP_ADDR_ENV).ok().as_deref())
+}
+
+pub fn http_addr_from_value(value: Option<&str>) -> Result<SocketAddr, StartupError> {
+    value
+        .unwrap_or("127.0.0.1:3000")
+        .parse()
+        .map_err(|error| StartupError::Config(format!("invalid {EXCHANGE_HTTP_ADDR_ENV}: {error}")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -952,6 +965,26 @@ mod tests {
     fn boot_config_rejects_unknown_mode() {
         assert!(matches!(
             BootConfig::from_values(Some("memory"), None),
+            Err(StartupError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn http_addr_defaults_to_localhost_and_parses_override() {
+        assert_eq!(
+            http_addr_from_value(None).unwrap(),
+            "127.0.0.1:3000".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            http_addr_from_value(Some("0.0.0.0:3000")).unwrap(),
+            "0.0.0.0:3000".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn http_addr_rejects_invalid_override() {
+        assert!(matches!(
+            http_addr_from_value(Some("not-a-socket")),
             Err(StartupError::Config(_))
         ));
     }
