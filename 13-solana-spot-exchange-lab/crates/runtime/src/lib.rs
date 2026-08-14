@@ -3,6 +3,10 @@
 use application::{CommandId, ExchangeApplication};
 use async_trait::async_trait;
 use domain::{AssetId, BalanceAmount, Fill, MarketSpec, Order, TraderId};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
 
@@ -34,6 +38,86 @@ pub enum MarketReply {
     Shutdown,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeMetrics {
+    inner: Arc<RuntimeMetricsInner>,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeMetricsInner {
+    actor_commands_received_total: AtomicU64,
+    actor_commands_accepted_total: AtomicU64,
+    actor_commands_rejected_total: AtomicU64,
+    actor_journal_append_failures_total: AtomicU64,
+    actor_apply_after_append_failures_total: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeMetricsSnapshot {
+    pub actor_commands_received_total: u64,
+    pub actor_commands_accepted_total: u64,
+    pub actor_commands_rejected_total: u64,
+    pub actor_journal_append_failures_total: u64,
+    pub actor_apply_after_append_failures_total: u64,
+}
+
+impl RuntimeMetrics {
+    pub fn snapshot(&self) -> RuntimeMetricsSnapshot {
+        RuntimeMetricsSnapshot {
+            actor_commands_received_total: self
+                .inner
+                .actor_commands_received_total
+                .load(Ordering::Relaxed),
+            actor_commands_accepted_total: self
+                .inner
+                .actor_commands_accepted_total
+                .load(Ordering::Relaxed),
+            actor_commands_rejected_total: self
+                .inner
+                .actor_commands_rejected_total
+                .load(Ordering::Relaxed),
+            actor_journal_append_failures_total: self
+                .inner
+                .actor_journal_append_failures_total
+                .load(Ordering::Relaxed),
+            actor_apply_after_append_failures_total: self
+                .inner
+                .actor_apply_after_append_failures_total
+                .load(Ordering::Relaxed),
+        }
+    }
+
+    fn record_command_received(&self) {
+        self.inner
+            .actor_commands_received_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_command_accepted(&self) {
+        self.inner
+            .actor_commands_accepted_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_command_rejected(&self) {
+        self.inner
+            .actor_commands_rejected_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_journal_append_failure(&self) {
+        self.inner
+            .actor_journal_append_failures_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_apply_after_append_failure(&self) {
+        self.inner
+            .actor_apply_after_append_failures_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 #[derive(Debug)]
 enum MarketCommand {
     CreditDeposit {
@@ -63,6 +147,7 @@ enum MarketCommand {
 #[derive(Debug, Clone)]
 pub struct MarketActorHandle {
     sender: mpsc::Sender<MarketCommand>,
+    metrics: RuntimeMetrics,
 }
 
 impl MarketActorHandle {
@@ -84,8 +169,13 @@ impl MarketActorHandle {
         journal: J,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(mailbox_capacity);
-        tokio::spawn(run_market_actor(app, receiver, journal));
-        Self { sender }
+        let metrics = RuntimeMetrics::default();
+        tokio::spawn(run_market_actor(app, receiver, journal, metrics.clone()));
+        Self { sender, metrics }
+    }
+
+    pub fn metrics_snapshot(&self) -> RuntimeMetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     pub async fn credit_deposit(
@@ -203,10 +293,12 @@ async fn run_market_actor(
     mut app: ExchangeApplication,
     mut receiver: mpsc::Receiver<MarketCommand>,
     mut journal: impl EventJournal,
+    metrics: RuntimeMetrics,
 ) {
     info!(event_count = app.events().len(), "market actor started");
     while let Some(command) = receiver.recv().await {
-        let should_shutdown = handle_command(&mut app, &mut journal, command).await;
+        metrics.record_command_received();
+        let should_shutdown = handle_command(&mut app, &mut journal, &metrics, command).await;
         if should_shutdown {
             break;
         }
@@ -217,6 +309,7 @@ async fn run_market_actor(
 async fn handle_command(
     app: &mut ExchangeApplication,
     journal: &mut impl EventJournal,
+    metrics: &RuntimeMetrics,
     command: MarketCommand,
 ) -> bool {
     match command {
@@ -244,26 +337,34 @@ async fn handle_command(
                         event,
                         MarketReply::DepositCredited,
                         request_id.as_deref(),
+                        metrics,
                     )
                     .await;
                     match &reply {
-                        Ok(_) => info!(
-                            request_id = request_id.as_deref().unwrap_or(""),
-                            command_id = command_id.get(),
-                            event_count = app.events().len(),
-                            "deposit command accepted"
-                        ),
-                        Err(error) => warn!(
-                            request_id = request_id.as_deref().unwrap_or(""),
-                            command_id = command_id.get(),
-                            error = ?error,
-                            "deposit command rejected"
-                        ),
+                        Ok(_) => {
+                            metrics.record_command_accepted();
+                            info!(
+                                request_id = request_id.as_deref().unwrap_or(""),
+                                command_id = command_id.get(),
+                                event_count = app.events().len(),
+                                "deposit command accepted"
+                            );
+                        }
+                        Err(error) => {
+                            metrics.record_command_rejected();
+                            warn!(
+                                request_id = request_id.as_deref().unwrap_or(""),
+                                command_id = command_id.get(),
+                                error = ?error,
+                                "deposit command rejected"
+                            );
+                        }
                     }
                     let _ = reply_to.send(reply);
                     should_shutdown
                 }
                 Err(error) => {
+                    metrics.record_command_rejected();
                     warn!(
                         request_id = request_id.as_deref().unwrap_or(""),
                         command_id = command_id.get(),
@@ -299,29 +400,37 @@ async fn handle_command(
                         event,
                         MarketReply::OrderPlaced { fills },
                         request_id.as_deref(),
+                        metrics,
                     )
                     .await;
                     match &reply {
-                        Ok(_) => info!(
-                            request_id = request_id.as_deref().unwrap_or(""),
-                            command_id = command_id.get(),
-                            order_id = order.id().get(),
-                            fill_count,
-                            event_count = app.events().len(),
-                            "order command accepted"
-                        ),
-                        Err(error) => warn!(
-                            request_id = request_id.as_deref().unwrap_or(""),
-                            command_id = command_id.get(),
-                            order_id = order.id().get(),
-                            error = ?error,
-                            "order command rejected"
-                        ),
+                        Ok(_) => {
+                            metrics.record_command_accepted();
+                            info!(
+                                request_id = request_id.as_deref().unwrap_or(""),
+                                command_id = command_id.get(),
+                                order_id = order.id().get(),
+                                fill_count,
+                                event_count = app.events().len(),
+                                "order command accepted"
+                            );
+                        }
+                        Err(error) => {
+                            metrics.record_command_rejected();
+                            warn!(
+                                request_id = request_id.as_deref().unwrap_or(""),
+                                command_id = command_id.get(),
+                                order_id = order.id().get(),
+                                error = ?error,
+                                "order command rejected"
+                            );
+                        }
                     }
                     let _ = reply_to.send(reply);
                     should_shutdown
                 }
                 Err(error) => {
+                    metrics.record_command_rejected();
                     warn!(
                         request_id = request_id.as_deref().unwrap_or(""),
                         command_id = command_id.get(),
@@ -347,6 +456,7 @@ async fn handle_command(
             let reply = Ok(MarketReply::Snapshot(MarketSnapshot {
                 event_count: app.events().len(),
             }));
+            metrics.record_command_accepted();
             let _ = reply_to.send(reply);
             false
         }
@@ -359,6 +469,7 @@ async fn handle_command(
                 event_count = app.events().len(),
                 "shutdown command received"
             );
+            metrics.record_command_accepted();
             let _ = reply_to.send(Ok(MarketReply::Shutdown));
             true
         }
@@ -371,8 +482,10 @@ async fn persist_and_apply(
     event: application::Event,
     success_reply: MarketReply,
     request_id: Option<&str>,
+    metrics: &RuntimeMetrics,
 ) -> (application::Result<MarketReply>, bool) {
     if journal.append(&event).await.is_err() {
+        metrics.record_journal_append_failure();
         error!(
             request_id = request_id.unwrap_or(""),
             command_id = event.command_id().get(),
@@ -384,6 +497,7 @@ async fn persist_and_apply(
     match app.apply_event(event) {
         Ok(()) => (Ok(success_reply), false),
         Err(error) => {
+            metrics.record_apply_after_append_failure();
             error!(
                 request_id = request_id.unwrap_or(""),
                 error = ?error,
@@ -637,6 +751,59 @@ mod tests {
         assert_eq!(
             actor.snapshot().await.unwrap(),
             MarketReply::Snapshot(MarketSnapshot { event_count: 0 })
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_metrics_count_accepted_and_rejected_commands() {
+        let actor = MarketActorHandle::spawn(market(), 8);
+
+        assert_eq!(
+            actor
+                .credit_deposit(command(1), trader(1), base_asset(), BalanceAmount::new(7))
+                .await
+                .unwrap(),
+            MarketReply::DepositCredited
+        );
+        assert_eq!(
+            actor
+                .credit_deposit(command(1), trader(2), base_asset(), BalanceAmount::new(7))
+                .await,
+            Err(application::Error::DuplicateCommand)
+        );
+
+        assert_eq!(
+            actor.metrics_snapshot(),
+            RuntimeMetricsSnapshot {
+                actor_commands_received_total: 2,
+                actor_commands_accepted_total: 1,
+                actor_commands_rejected_total: 1,
+                actor_journal_append_failures_total: 0,
+                actor_apply_after_append_failures_total: 0,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_metrics_count_journal_append_failures() {
+        let actor = MarketActorHandle::spawn_with_journal(market(), 8, FailingJournal);
+
+        assert_eq!(
+            actor
+                .credit_deposit(command(1), trader(1), base_asset(), BalanceAmount::new(7))
+                .await,
+            Err(application::Error::JournalAppendFailed)
+        );
+
+        assert_eq!(
+            actor.metrics_snapshot(),
+            RuntimeMetricsSnapshot {
+                actor_commands_received_total: 1,
+                actor_commands_accepted_total: 0,
+                actor_commands_rejected_total: 1,
+                actor_journal_append_failures_total: 1,
+                actor_apply_after_append_failures_total: 0,
+            }
         );
     }
 }

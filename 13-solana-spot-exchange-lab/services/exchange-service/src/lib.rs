@@ -82,7 +82,7 @@ struct ServiceMetricsInner {
 }
 
 impl ServiceMetrics {
-    fn snapshot(&self) -> MetricsResponse {
+    fn snapshot(&self, runtime: runtime::RuntimeMetricsSnapshot) -> MetricsResponse {
         MetricsResponse {
             http_requests_total: self.inner.http_requests_total.load(Ordering::Relaxed),
             ready_checks_total: self.inner.ready_checks_total.load(Ordering::Relaxed),
@@ -90,6 +90,12 @@ impl ServiceMetrics {
             deposits_accepted_total: self.inner.deposits_accepted_total.load(Ordering::Relaxed),
             orders_accepted_total: self.inner.orders_accepted_total.load(Ordering::Relaxed),
             api_errors_total: self.inner.api_errors_total.load(Ordering::Relaxed),
+            actor_commands_received_total: runtime.actor_commands_received_total,
+            actor_commands_accepted_total: runtime.actor_commands_accepted_total,
+            actor_commands_rejected_total: runtime.actor_commands_rejected_total,
+            actor_journal_append_failures_total: runtime.actor_journal_append_failures_total,
+            actor_apply_after_append_failures_total: runtime
+                .actor_apply_after_append_failures_total,
         }
     }
 
@@ -400,7 +406,7 @@ async fn ready(
 }
 
 async fn metrics_endpoint(State(state): State<ServiceState>) -> Json<MetricsResponse> {
-    Json(state.metrics.snapshot())
+    Json(state.metrics.snapshot(state.actor.metrics_snapshot()))
 }
 
 async fn credit_deposit(
@@ -676,6 +682,11 @@ pub struct MetricsResponse {
     pub deposits_accepted_total: u64,
     pub orders_accepted_total: u64,
     pub api_errors_total: u64,
+    pub actor_commands_received_total: u64,
+    pub actor_commands_accepted_total: u64,
+    pub actor_commands_rejected_total: u64,
+    pub actor_journal_append_failures_total: u64,
+    pub actor_apply_after_append_failures_total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -957,7 +968,12 @@ mod tests {
                 "snapshot_requests_total": 0,
                 "deposits_accepted_total": 1,
                 "orders_accepted_total": 0,
-                "api_errors_total": 1
+                "api_errors_total": 1,
+                "actor_commands_received_total": 2,
+                "actor_commands_accepted_total": 1,
+                "actor_commands_rejected_total": 1,
+                "actor_journal_append_failures_total": 0,
+                "actor_apply_after_append_failures_total": 0
             })
         );
     }
@@ -1012,7 +1028,12 @@ mod tests {
                 "snapshot_requests_total": 1,
                 "deposits_accepted_total": 0,
                 "orders_accepted_total": 0,
-                "api_errors_total": 0
+                "api_errors_total": 0,
+                "actor_commands_received_total": 2,
+                "actor_commands_accepted_total": 2,
+                "actor_commands_rejected_total": 0,
+                "actor_journal_append_failures_total": 0,
+                "actor_apply_after_append_failures_total": 0
             })
         );
     }
