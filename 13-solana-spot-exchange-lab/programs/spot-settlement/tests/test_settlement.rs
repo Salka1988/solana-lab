@@ -178,51 +178,6 @@ fn settle_fill_ix(params: SettleFillParams<'_>) -> Instruction {
     )
 }
 
-struct SettleSignedFillParams<'a> {
-    authority: Pubkey,
-    market: &'a MarketAccounts,
-    buyer: Pubkey,
-    seller: Pubkey,
-    buyer_balance: Pubkey,
-    seller_balance: Pubkey,
-    buyer_order_fill_state: Pubkey,
-    seller_order_fill_state: Pubkey,
-    settlement_id: u64,
-    payer: Pubkey,
-    args: spot_settlement::SignedFillArgs,
-}
-
-fn settle_signed_fill_ix(params: SettleSignedFillParams<'_>) -> Instruction {
-    Instruction::new_with_bytes(
-        spot_settlement::id(),
-        &spot_settlement::instruction::SettleSignedFill {
-            settlement_id: params.settlement_id,
-            buyer_order_hash: params.args.buyer_order_hash,
-            seller_order_hash: params.args.seller_order_hash,
-            args: params.args,
-        }
-        .data(),
-        spot_settlement::accounts::SettleSignedFill {
-            settlement_authority: params.authority,
-            market_config: params.market.market_config,
-            buyer: params.buyer,
-            seller: params.seller,
-            buyer_balance: params.buyer_balance,
-            seller_balance: params.seller_balance,
-            buyer_order_fill_state: params.buyer_order_fill_state,
-            seller_order_fill_state: params.seller_order_fill_state,
-            settlement_receipt: settlement_receipt_pda(
-                params.market.market_config,
-                params.settlement_id,
-            ),
-            payer: params.payer,
-            instructions_sysvar: solana_sdk_ids::sysvar::instructions::ID,
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
-    )
-}
-
 struct CancelSignedOrderParams<'a> {
     trader: Pubkey,
     market: &'a MarketAccounts,
@@ -451,40 +406,25 @@ fn signed_fill_instructions(
     fixture: &Fixture,
     args: spot_settlement::SignedFillArgs,
 ) -> Vec<Instruction> {
-    let buyer_preimage = args.buyer_order.signing_preimage();
-    let seller_preimage = args.seller_order.signing_preimage();
+    signed_fill_builder(fixture).build(signed_settlement_accounts(fixture), args)
+}
 
-    vec![
-        new_ed25519_instruction_with_signature(
-            &buyer_preimage,
-            &args.buyer_signature,
-            fixture.buyer.pubkey().as_array(),
-        ),
-        new_ed25519_instruction_with_signature(
-            &seller_preimage,
-            &args.seller_signature,
-            fixture.seller.pubkey().as_array(),
-        ),
-        settle_signed_fill_ix(SettleSignedFillParams {
-            authority: fixture.settlement_authority.pubkey(),
-            market: &fixture.market,
-            buyer: fixture.buyer.pubkey(),
-            seller: fixture.seller.pubkey(),
-            buyer_balance: fixture.buyer_balance,
-            seller_balance: fixture.seller_balance,
-            buyer_order_fill_state: order_fill_state_pda(
-                fixture.market.market_config,
-                args.buyer_order_hash,
-            ),
-            seller_order_fill_state: order_fill_state_pda(
-                fixture.market.market_config,
-                args.seller_order_hash,
-            ),
-            settlement_id: args.settlement_id,
-            payer: fixture.settlement_authority.pubkey(),
-            args,
-        }),
-    ]
+fn signed_fill_builder(
+    _fixture: &Fixture,
+) -> settlement_client::SignedSettlementInstructionBuilder {
+    settlement_client::SignedSettlementInstructionBuilder::new()
+}
+
+fn signed_settlement_accounts(fixture: &Fixture) -> settlement_client::SignedSettlementAccounts {
+    settlement_client::SignedSettlementAccounts {
+        settlement_authority: fixture.settlement_authority.pubkey(),
+        market_config: fixture.market.market_config,
+        buyer: fixture.buyer.pubkey(),
+        seller: fixture.seller.pubkey(),
+        buyer_balance: fixture.buyer_balance,
+        seller_balance: fixture.seller_balance,
+        payer: fixture.settlement_authority.pubkey(),
+    }
 }
 
 fn harmless_system_instruction(fixture: &Fixture) -> Instruction {
@@ -869,7 +809,7 @@ fn signed_settlement_requires_ed25519_precompiles_and_updates_fill_state() {
 }
 
 #[test]
-fn signed_settlement_rejects_mismatched_ed25519_message() {
+fn signed_settlement_builder_allows_prefix_instructions_before_signatures() {
     let (mut svm, admin) = setup();
     let fixture = initialized_market(&mut svm, admin);
     seed_trade_balances(&mut svm, &fixture);
@@ -878,6 +818,31 @@ fn signed_settlement_rejects_mismatched_ed25519_message() {
         &fixture.seller,
         fixture.market.market_config,
         101,
+        SIGNED_FILL_QUANTITY,
+    );
+    let instructions = signed_fill_builder(&fixture)
+        .with_prefix_instruction(harmless_system_instruction(&fixture))
+        .build(signed_settlement_accounts(&fixture), args);
+
+    assert!(test_support::send_transaction(
+        &mut svm,
+        fixture.settlement_authority.pubkey(),
+        instructions,
+        &[&fixture.settlement_authority],
+    )
+    .is_ok());
+}
+
+#[test]
+fn signed_settlement_rejects_mismatched_ed25519_message() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        102,
         SIGNED_FILL_QUANTITY,
     );
     let mut instructions = signed_fill_instructions(&fixture, args);
