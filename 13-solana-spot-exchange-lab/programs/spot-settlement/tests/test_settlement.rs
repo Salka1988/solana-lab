@@ -336,7 +336,7 @@ fn signed_fill_instructions(
     fixture: &Fixture,
     args: spot_settlement::SignedFillArgs,
 ) -> Vec<Instruction> {
-    signed_fill_builder(fixture).build(signed_settlement_accounts(fixture), args)
+    signed_fill_builder(fixture).build_for_market(signed_settlement_flow_accounts(fixture), args)
 }
 
 fn signed_fill_builder(
@@ -353,6 +353,19 @@ fn signed_settlement_accounts(fixture: &Fixture) -> settlement_client::SignedSet
         seller: fixture.seller.pubkey(),
         buyer_balance: fixture.buyer_balance,
         seller_balance: fixture.seller_balance,
+        payer: fixture.settlement_authority.pubkey(),
+    }
+}
+
+fn signed_settlement_flow_accounts(
+    fixture: &Fixture,
+) -> settlement_client::SignedSettlementFlowAccounts {
+    settlement_client::SignedSettlementFlowAccounts {
+        settlement_authority: fixture.settlement_authority.pubkey(),
+        base_mint: fixture.market.base_mint,
+        quote_mint: fixture.market.quote_mint,
+        buyer: fixture.buyer.pubkey(),
+        seller: fixture.seller.pubkey(),
         payer: fixture.settlement_authority.pubkey(),
     }
 }

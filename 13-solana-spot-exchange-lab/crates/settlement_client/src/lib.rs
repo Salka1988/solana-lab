@@ -59,6 +59,36 @@ pub struct SignedSettlementAccounts {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignedSettlementFlowAccounts {
+    pub settlement_authority: Pubkey,
+    pub base_mint: Pubkey,
+    pub quote_mint: Pubkey,
+    pub buyer: Pubkey,
+    pub seller: Pubkey,
+    pub payer: Pubkey,
+}
+
+impl SignedSettlementFlowAccounts {
+    pub fn market_config(self) -> Pubkey {
+        market_config_pda(self.base_mint, self.quote_mint).0
+    }
+
+    pub fn to_settlement_accounts(self) -> SignedSettlementAccounts {
+        let market_config = self.market_config();
+
+        SignedSettlementAccounts {
+            settlement_authority: self.settlement_authority,
+            market_config,
+            buyer: self.buyer,
+            seller: self.seller,
+            buyer_balance: trader_market_balance_pda(market_config, self.buyer).0,
+            seller_balance: trader_market_balance_pda(market_config, self.seller).0,
+            payer: self.payer,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CancelSignedOrderAccounts {
     pub trader: Pubkey,
     pub market_config: Pubkey,
@@ -114,6 +144,14 @@ impl SignedSettlementInstructionBuilder {
         instructions.push(settle_signed_fill_instruction(accounts, args));
         instructions
     }
+
+    pub fn build_for_market(
+        self,
+        accounts: SignedSettlementFlowAccounts,
+        args: spot_settlement::SignedFillArgs,
+    ) -> Vec<Instruction> {
+        self.build(accounts.to_settlement_accounts(), args)
+    }
 }
 
 pub fn signed_settlement_instructions(
@@ -121,6 +159,13 @@ pub fn signed_settlement_instructions(
     args: spot_settlement::SignedFillArgs,
 ) -> Vec<Instruction> {
     SignedSettlementInstructionBuilder::new().build(accounts, args)
+}
+
+pub fn signed_settlement_flow_instructions(
+    accounts: SignedSettlementFlowAccounts,
+    args: spot_settlement::SignedFillArgs,
+) -> Vec<Instruction> {
+    SignedSettlementInstructionBuilder::new().build_for_market(accounts, args)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -386,6 +431,17 @@ mod tests {
         }
     }
 
+    fn flow_accounts() -> SignedSettlementFlowAccounts {
+        SignedSettlementFlowAccounts {
+            settlement_authority: pubkey(8),
+            base_mint: pubkey(11),
+            quote_mint: pubkey(12),
+            buyer: pubkey(2),
+            seller: pubkey(3),
+            payer: pubkey(8),
+        }
+    }
+
     fn cancel_accounts() -> CancelSignedOrderAccounts {
         CancelSignedOrderAccounts {
             trader: pubkey(2),
@@ -417,6 +473,38 @@ mod tests {
             solana_sdk_ids::ed25519_program::ID
         );
         assert_eq!(instructions[3].program_id, spot_settlement::id());
+    }
+
+    #[test]
+    fn flow_accounts_derive_manual_signed_settlement_accounts() {
+        let flow_accounts = flow_accounts();
+        let market_config = market_config_pda(flow_accounts.base_mint, flow_accounts.quote_mint).0;
+
+        assert_eq!(
+            flow_accounts.to_settlement_accounts(),
+            SignedSettlementAccounts {
+                settlement_authority: flow_accounts.settlement_authority,
+                market_config,
+                buyer: flow_accounts.buyer,
+                seller: flow_accounts.seller,
+                buyer_balance: trader_market_balance_pda(market_config, flow_accounts.buyer).0,
+                seller_balance: trader_market_balance_pda(market_config, flow_accounts.seller).0,
+                payer: flow_accounts.payer,
+            }
+        );
+    }
+
+    #[test]
+    fn flow_builder_matches_manual_signed_settlement_builder() {
+        let flow_accounts = flow_accounts();
+        let args = signed_fill_args();
+
+        let manual = SignedSettlementInstructionBuilder::new()
+            .build(flow_accounts.to_settlement_accounts(), args);
+        let derived =
+            SignedSettlementInstructionBuilder::new().build_for_market(flow_accounts, args);
+
+        assert_eq!(derived, manual);
     }
 
     #[test]
