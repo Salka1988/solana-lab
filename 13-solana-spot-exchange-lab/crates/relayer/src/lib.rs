@@ -35,6 +35,7 @@ pub enum SubmissionError {
     BuildTransaction(String),
     MissingRequiredSigner(Pubkey),
     Rejected(String),
+    Uncertain(String),
 }
 
 #[async_trait]
@@ -70,6 +71,56 @@ impl SolanaSubmitter for RecordingSubmitter {
         Ok(SubmittedTransaction {
             signature: self.signature,
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmationStatus {
+    Confirmed,
+    Failed(String),
+    Uncertain(String),
+}
+
+#[async_trait]
+pub trait TransactionConfirmer {
+    async fn confirm(
+        &mut self,
+        signature: TransactionSignature,
+    ) -> Result<ConfirmationStatus, SubmissionError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmingSubmitter<S, C> {
+    submitter: S,
+    confirmer: C,
+}
+
+impl<S, C> ConfirmingSubmitter<S, C> {
+    pub const fn new(submitter: S, confirmer: C) -> Self {
+        Self {
+            submitter,
+            confirmer,
+        }
+    }
+}
+
+#[async_trait]
+impl<S, C> SolanaSubmitter for ConfirmingSubmitter<S, C>
+where
+    S: SolanaSubmitter + Send,
+    C: TransactionConfirmer + Send,
+{
+    async fn submit(
+        &mut self,
+        plan: InstructionPlan,
+    ) -> Result<SubmittedTransaction, SubmissionError> {
+        let submitted = self.submitter.submit(plan).await?;
+
+        match self.confirmer.confirm(submitted.signature).await? {
+            ConfirmationStatus::Confirmed => Ok(submitted),
+            ConfirmationStatus::Failed(error) => Err(SubmissionError::Rejected(error)),
+            ConfirmationStatus::Uncertain(error) => Err(SubmissionError::Uncertain(error)),
+        }
     }
 }
 
@@ -382,6 +433,45 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct FixedConfirmer {
+        result: Result<ConfirmationStatus, SubmissionError>,
+        confirmed_signatures: Vec<TransactionSignature>,
+    }
+
+    impl FixedConfirmer {
+        const fn new(result: Result<ConfirmationStatus, SubmissionError>) -> Self {
+            Self {
+                result,
+                confirmed_signatures: Vec::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TransactionConfirmer for FixedConfirmer {
+        async fn confirm(
+            &mut self,
+            signature: TransactionSignature,
+        ) -> Result<ConfirmationStatus, SubmissionError> {
+            self.confirmed_signatures.push(signature);
+            self.result.clone()
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct FailingSubmitter(SubmissionError);
+
+    #[async_trait]
+    impl SolanaSubmitter for FailingSubmitter {
+        async fn submit(
+            &mut self,
+            _plan: InstructionPlan,
+        ) -> Result<SubmittedTransaction, SubmissionError> {
+            Err(self.0.clone())
+        }
+    }
+
     fn pubkey(byte: u8) -> Pubkey {
         Pubkey::new_from_array([byte; 32])
     }
@@ -564,6 +654,136 @@ mod tests {
 
         assert_eq!(submitted.signature, [43; 64]);
         assert_eq!(submitter.submitted_plans, vec![plan]);
+    }
+
+    #[tokio::test]
+    async fn confirming_submitter_returns_submitted_transaction_when_confirmed() {
+        let base_mint = pubkey(11);
+        let quote_mint = pubkey(12);
+        let market_config = settlement_client::market_config_pda(base_mint, quote_mint).0;
+        let plan = SettlementInstructionPlanner::default().plan_cancel_signed_order(
+            CancelSignedOrderRequest {
+                trader: pubkey(2),
+                base_mint,
+                quote_mint,
+                payer: pubkey(2),
+                order_hash: [9; 32],
+                order: signed_order(
+                    market_config,
+                    pubkey(2),
+                    spot_settlement::SignedOrderSide::Bid,
+                ),
+            },
+        );
+        let mut submitter = ConfirmingSubmitter::new(
+            RecordingSubmitter::new([50; 64]),
+            FixedConfirmer::new(Ok(ConfirmationStatus::Confirmed)),
+        );
+
+        let submitted = submitter.submit(plan).await.unwrap();
+
+        assert_eq!(submitted.signature, [50; 64]);
+        assert_eq!(submitter.confirmer.confirmed_signatures, vec![[50; 64]]);
+    }
+
+    #[tokio::test]
+    async fn confirming_submitter_maps_failed_confirmation_to_rejected() {
+        let base_mint = pubkey(11);
+        let quote_mint = pubkey(12);
+        let market_config = settlement_client::market_config_pda(base_mint, quote_mint).0;
+        let plan = SettlementInstructionPlanner::default().plan_cancel_signed_order(
+            CancelSignedOrderRequest {
+                trader: pubkey(2),
+                base_mint,
+                quote_mint,
+                payer: pubkey(2),
+                order_hash: [9; 32],
+                order: signed_order(
+                    market_config,
+                    pubkey(2),
+                    spot_settlement::SignedOrderSide::Bid,
+                ),
+            },
+        );
+        let mut submitter = ConfirmingSubmitter::new(
+            RecordingSubmitter::new([51; 64]),
+            FixedConfirmer::new(Ok(ConfirmationStatus::Failed(
+                "execution failed".to_string(),
+            ))),
+        );
+
+        let error = submitter.submit(plan).await.unwrap_err();
+
+        assert_eq!(
+            error,
+            SubmissionError::Rejected("execution failed".to_string())
+        );
+        assert_eq!(submitter.confirmer.confirmed_signatures, vec![[51; 64]]);
+    }
+
+    #[tokio::test]
+    async fn confirming_submitter_surfaces_uncertain_confirmation() {
+        let base_mint = pubkey(11);
+        let quote_mint = pubkey(12);
+        let market_config = settlement_client::market_config_pda(base_mint, quote_mint).0;
+        let plan = SettlementInstructionPlanner::default().plan_cancel_signed_order(
+            CancelSignedOrderRequest {
+                trader: pubkey(2),
+                base_mint,
+                quote_mint,
+                payer: pubkey(2),
+                order_hash: [9; 32],
+                order: signed_order(
+                    market_config,
+                    pubkey(2),
+                    spot_settlement::SignedOrderSide::Bid,
+                ),
+            },
+        );
+        let mut submitter = ConfirmingSubmitter::new(
+            RecordingSubmitter::new([52; 64]),
+            FixedConfirmer::new(Ok(ConfirmationStatus::Uncertain(
+                "status not found".to_string(),
+            ))),
+        );
+
+        let error = submitter.submit(plan).await.unwrap_err();
+
+        assert_eq!(
+            error,
+            SubmissionError::Uncertain("status not found".to_string())
+        );
+        assert_eq!(submitter.confirmer.confirmed_signatures, vec![[52; 64]]);
+    }
+
+    #[tokio::test]
+    async fn confirming_submitter_skips_confirmation_when_submit_fails() {
+        let base_mint = pubkey(11);
+        let quote_mint = pubkey(12);
+        let market_config = settlement_client::market_config_pda(base_mint, quote_mint).0;
+        let plan = SettlementInstructionPlanner::default().plan_cancel_signed_order(
+            CancelSignedOrderRequest {
+                trader: pubkey(2),
+                base_mint,
+                quote_mint,
+                payer: pubkey(2),
+                order_hash: [9; 32],
+                order: signed_order(
+                    market_config,
+                    pubkey(2),
+                    spot_settlement::SignedOrderSide::Bid,
+                ),
+            },
+        );
+        let mut submitter = ConfirmingSubmitter::new(
+            FailingSubmitter(SubmissionError::Rejected("rpc rejected".to_string())),
+            FixedConfirmer::new(Ok(ConfirmationStatus::Confirmed)),
+        );
+
+        let error = submitter.submit(plan).await.unwrap_err();
+
+        assert_eq!(error, SubmissionError::Rejected("rpc rejected".to_string()));
+        assert!(submitter.confirmer.confirmed_signatures.is_empty());
     }
 
     #[tokio::test]
