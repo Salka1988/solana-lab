@@ -13,6 +13,46 @@ pub struct InstructionPlan {
     pub required_signers: Vec<Pubkey>,
 }
 
+pub type TransactionSignature = [u8; 64];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubmittedTransaction {
+    pub signature: TransactionSignature,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmissionError {
+    Rejected(String),
+}
+
+pub trait SolanaSubmitter {
+    fn submit(&mut self, plan: InstructionPlan) -> Result<SubmittedTransaction, SubmissionError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingSubmitter {
+    signature: TransactionSignature,
+    pub submitted_plans: Vec<InstructionPlan>,
+}
+
+impl RecordingSubmitter {
+    pub const fn new(signature: TransactionSignature) -> Self {
+        Self {
+            signature,
+            submitted_plans: Vec::new(),
+        }
+    }
+}
+
+impl SolanaSubmitter for RecordingSubmitter {
+    fn submit(&mut self, plan: InstructionPlan) -> Result<SubmittedTransaction, SubmissionError> {
+        self.submitted_plans.push(plan);
+        Ok(SubmittedTransaction {
+            signature: self.signature,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettlementInstructionPlanner {
     signed_settlement_compute_budget: ComputeBudgetPreset,
@@ -234,5 +274,56 @@ mod tests {
             solana_compute_budget_interface::id()
         );
         assert_eq!(plan.instructions[2].program_id, spot_settlement::id());
+    }
+
+    #[test]
+    fn submitter_accepts_signed_settlement_plan() {
+        let base_mint = pubkey(11);
+        let quote_mint = pubkey(12);
+        let market_config = settlement_client::market_config_pda(base_mint, quote_mint).0;
+        let plan = SettlementInstructionPlanner::default().plan_signed_settlement(
+            SignedSettlementRequest {
+                settlement_authority: pubkey(8),
+                base_mint,
+                quote_mint,
+                buyer: pubkey(2),
+                seller: pubkey(3),
+                payer: pubkey(9),
+                args: signed_fill_args(market_config),
+            },
+        );
+        let mut submitter = RecordingSubmitter::new([42; 64]);
+
+        let submitted = submitter.submit(plan.clone()).unwrap();
+
+        assert_eq!(submitted.signature, [42; 64]);
+        assert_eq!(submitter.submitted_plans, vec![plan]);
+    }
+
+    #[test]
+    fn submitter_accepts_cancel_plan() {
+        let base_mint = pubkey(11);
+        let quote_mint = pubkey(12);
+        let market_config = settlement_client::market_config_pda(base_mint, quote_mint).0;
+        let plan = SettlementInstructionPlanner::default().plan_cancel_signed_order(
+            CancelSignedOrderRequest {
+                trader: pubkey(2),
+                base_mint,
+                quote_mint,
+                payer: pubkey(2),
+                order_hash: [9; 32],
+                order: signed_order(
+                    market_config,
+                    pubkey(2),
+                    spot_settlement::SignedOrderSide::Bid,
+                ),
+            },
+        );
+        let mut submitter = RecordingSubmitter::new([43; 64]);
+
+        let submitted = submitter.submit(plan.clone()).unwrap();
+
+        assert_eq!(submitted.signature, [43; 64]);
+        assert_eq!(submitter.submitted_plans, vec![plan]);
     }
 }
