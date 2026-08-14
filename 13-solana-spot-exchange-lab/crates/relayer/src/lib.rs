@@ -14,6 +14,8 @@ use solana_keypair::Keypair;
 use solana_message::{Message, VersionedMessage};
 #[cfg(feature = "rpc")]
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
+#[cfg(feature = "rpc")]
+use solana_signature::Signature;
 use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 
@@ -448,6 +450,47 @@ impl RpcTransactionSender {
 
     pub const fn from_client(client: RpcClient) -> Self {
         Self { client }
+    }
+}
+
+#[cfg(feature = "rpc")]
+pub struct RpcConfirmationPoller {
+    client: RpcClient,
+}
+
+#[cfg(feature = "rpc")]
+impl RpcConfirmationPoller {
+    pub fn new(url: String) -> Self {
+        Self {
+            client: RpcClient::new(url),
+        }
+    }
+
+    pub const fn from_client(client: RpcClient) -> Self {
+        Self { client }
+    }
+}
+
+#[cfg(feature = "rpc")]
+#[async_trait]
+impl ConfirmationPoller for RpcConfirmationPoller {
+    async fn poll(
+        &mut self,
+        signature: TransactionSignature,
+    ) -> Result<ConfirmationStatus, SubmissionError> {
+        let signature = Signature::from(signature);
+        match self
+            .client
+            .get_signature_status(&signature)
+            .await
+            .map_err(|error| SubmissionError::Uncertain(error.to_string()))?
+        {
+            Some(Ok(())) => Ok(ConfirmationStatus::Confirmed),
+            Some(Err(error)) => Ok(ConfirmationStatus::Failed(error.to_string())),
+            None => Ok(ConfirmationStatus::Uncertain(
+                "signature status not found".to_string(),
+            )),
+        }
     }
 }
 

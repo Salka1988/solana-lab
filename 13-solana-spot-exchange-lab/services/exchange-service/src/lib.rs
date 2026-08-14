@@ -5,8 +5,10 @@ use std::{
     collections::BTreeMap,
     env,
     net::SocketAddr,
+    str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use anchor_lang::prelude::Pubkey;
@@ -24,9 +26,10 @@ use domain::{
     AssetId, BalanceAmount, LotSize, MarketId, MarketSpec, Order, OrderId, OrderSequence, Price,
     Quantity, Side, TickSize, TraderId,
 };
-use persistence::{PersistenceError, PostgresEventJournal};
+use persistence::{PersistenceError, PostgresEventJournal, SettlementOutboxItem};
 use runtime::{MarketActorHandle, MarketReply, MarketSnapshot};
 use serde::{Deserialize, Serialize};
+use solana_keypair::Keypair;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
@@ -35,8 +38,21 @@ pub const EXCHANGE_BOOT_MODE_ENV: &str = "EXCHANGE_BOOT_MODE";
 pub const EXCHANGE_HTTP_ADDR_ENV: &str = "EXCHANGE_HTTP_ADDR";
 pub const EXCHANGE_API_KEY_ENV: &str = "EXCHANGE_API_KEY";
 pub const DATABASE_URL_ENV: &str = "DATABASE_URL";
+pub const EXCHANGE_RELAYER_ENABLED_ENV: &str = "EXCHANGE_RELAYER_ENABLED";
+pub const EXCHANGE_SOLANA_RPC_URL_ENV: &str = "EXCHANGE_SOLANA_RPC_URL";
+pub const EXCHANGE_RELAYER_MARKET_ID_ENV: &str = "EXCHANGE_RELAYER_MARKET_ID";
+pub const EXCHANGE_RELAYER_SETTLEMENT_AUTHORITY_ENV: &str = "EXCHANGE_RELAYER_SETTLEMENT_AUTHORITY";
+pub const EXCHANGE_RELAYER_BASE_MINT_ENV: &str = "EXCHANGE_RELAYER_BASE_MINT";
+pub const EXCHANGE_RELAYER_QUOTE_MINT_ENV: &str = "EXCHANGE_RELAYER_QUOTE_MINT";
+pub const EXCHANGE_RELAYER_PAYER_ENV: &str = "EXCHANGE_RELAYER_PAYER";
+pub const EXCHANGE_RELAYER_SETTLEMENT_AUTHORITY_KEYPAIR_ENV: &str =
+    "EXCHANGE_RELAYER_SETTLEMENT_AUTHORITY_KEYPAIR";
+pub const EXCHANGE_RELAYER_PAYER_KEYPAIR_ENV: &str = "EXCHANGE_RELAYER_PAYER_KEYPAIR";
+pub const EXCHANGE_RELAYER_INTERVAL_MS_ENV: &str = "EXCHANGE_RELAYER_INTERVAL_MS";
 pub const X_API_KEY_HEADER: &str = "x-api-key";
 pub const X_REQUEST_ID_HEADER: &str = "x-request-id";
+const DEFAULT_RELAYER_INTERVAL_MS: u64 = 1_000;
+const SETTLEMENT_WORKER_BATCH_LIMIT: i64 = 32;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -70,6 +86,7 @@ pub struct ServiceState {
     market: MarketSpec,
     actor: MarketActorHandle,
     settlement: SettlementEdgeState,
+    settlement_outbox: Option<PostgresEventJournal>,
     metrics: ServiceMetrics,
     api_key: Option<String>,
     settlement_config: Option<SettlementBridgeConfig>,
@@ -178,17 +195,37 @@ struct ServiceMetricsInner {
     snapshot_requests_total: AtomicU64,
     deposits_accepted_total: AtomicU64,
     orders_accepted_total: AtomicU64,
+    settlement_requests_queued_total: AtomicU64,
+    settlement_requests_submitted_total: AtomicU64,
+    settlement_requests_failed_total: AtomicU64,
     api_errors_total: AtomicU64,
 }
 
 impl ServiceMetrics {
-    fn snapshot(&self, runtime: runtime::RuntimeMetricsSnapshot) -> MetricsResponse {
+    fn snapshot(
+        &self,
+        runtime: runtime::RuntimeMetricsSnapshot,
+        settlements_pending: usize,
+    ) -> MetricsResponse {
         MetricsResponse {
             http_requests_total: self.inner.http_requests_total.load(Ordering::Relaxed),
             ready_checks_total: self.inner.ready_checks_total.load(Ordering::Relaxed),
             snapshot_requests_total: self.inner.snapshot_requests_total.load(Ordering::Relaxed),
             deposits_accepted_total: self.inner.deposits_accepted_total.load(Ordering::Relaxed),
             orders_accepted_total: self.inner.orders_accepted_total.load(Ordering::Relaxed),
+            settlement_requests_queued_total: self
+                .inner
+                .settlement_requests_queued_total
+                .load(Ordering::Relaxed),
+            settlement_requests_submitted_total: self
+                .inner
+                .settlement_requests_submitted_total
+                .load(Ordering::Relaxed),
+            settlement_requests_failed_total: self
+                .inner
+                .settlement_requests_failed_total
+                .load(Ordering::Relaxed),
+            settlement_requests_pending: u64::try_from(settlements_pending).unwrap_or(u64::MAX),
             api_errors_total: self.inner.api_errors_total.load(Ordering::Relaxed),
             actor_commands_received_total: runtime.actor_commands_received_total,
             actor_commands_accepted_total: runtime.actor_commands_accepted_total,
@@ -227,6 +264,24 @@ impl ServiceMetrics {
         self.inner
             .orders_accepted_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_settlement_requests_queued(&self, count: usize) {
+        self.inner
+            .settlement_requests_queued_total
+            .fetch_add(count as u64, Ordering::Relaxed);
+    }
+
+    fn record_settlement_requests_submitted(&self, count: usize) {
+        self.inner
+            .settlement_requests_submitted_total
+            .fetch_add(count as u64, Ordering::Relaxed);
+    }
+
+    fn record_settlement_requests_failed(&self, count: usize) {
+        self.inner
+            .settlement_requests_failed_total
+            .fetch_add(count as u64, Ordering::Relaxed);
     }
 
     fn record_api_error(&self) {
@@ -273,17 +328,19 @@ pub async fn app_from_env() -> Result<Router, StartupError> {
 
 pub async fn app_from_config(config: BootConfig) -> Result<Router, StartupError> {
     info!(boot_mode = ?config.mode, "building exchange service");
+    let relayer = config.relayer.clone();
     match config.mode {
         BootMode::Local => {
             let market = default_market();
             let actor = MarketActorHandle::spawn(market, 1024);
-            Ok(app_with_actor_and_api_key(
+            Ok(app_with_actor_api_key_and_relayer(
                 MARKET_SOL_USDC,
                 ReadyBootMode::Local,
                 JournalMode::Noop,
                 market,
                 actor,
                 config.api_key,
+                relayer,
             ))
         }
         BootMode::Postgres => {
@@ -292,6 +349,7 @@ pub async fn app_from_config(config: BootConfig) -> Result<Router, StartupError>
                     StartupError::Config(format!("{DATABASE_URL_ENV} is required"))
                 })?,
                 config.api_key,
+                relayer,
             )
             .await
         }
@@ -299,21 +357,23 @@ pub async fn app_from_config(config: BootConfig) -> Result<Router, StartupError>
 }
 
 pub async fn app_with_postgres(database_url: &str) -> Result<Router, StartupError> {
-    app_with_postgres_and_api_key(database_url, None).await
+    app_with_postgres_and_api_key(database_url, None, RelayerBootConfig::Disabled).await
 }
 
 async fn app_with_postgres_and_api_key(
     database_url: &str,
     api_key: Option<String>,
+    relayer: RelayerBootConfig,
 ) -> Result<Router, StartupError> {
     info!("connecting postgres event journal");
     let journal = PostgresEventJournal::connect(database_url).await?;
-    app_with_postgres_journal(journal, api_key).await
+    app_with_postgres_journal(journal, api_key, relayer).await
 }
 
 async fn app_with_postgres_journal(
     journal: PostgresEventJournal,
     api_key: Option<String>,
+    relayer: RelayerBootConfig,
 ) -> Result<Router, StartupError> {
     let market = default_market();
     info!("running postgres migrations");
@@ -322,16 +382,19 @@ async fn app_with_postgres_journal(
     let events = journal.read_all().await?;
     info!(event_count = events.len(), "replaying exchange events");
     let exchange = application::ExchangeApplication::replay(market, events)?;
+    let settlement_outbox = Some(journal.clone());
     let actor =
         MarketActorHandle::spawn_from_app(exchange, 1024, PostgresRuntimeJournal::new(journal));
 
-    Ok(app_with_actor_and_api_key(
+    Ok(app_with_actor_api_key_and_relayer_and_outbox(
         MARKET_SOL_USDC,
         ReadyBootMode::Postgres,
         JournalMode::Postgres,
         market,
         actor,
         api_key,
+        relayer,
+        settlement_outbox,
     ))
 }
 
@@ -353,14 +416,63 @@ pub fn app_with_actor_and_api_key(
     actor: MarketActorHandle,
     api_key: Option<String>,
 ) -> Router {
-    app_with_actor_api_key_and_settlement(
+    app_with_actor_api_key_and_relayer(
         market_id,
         boot_mode,
         journal_mode,
         market,
         actor,
         api_key,
+        RelayerBootConfig::Disabled,
+    )
+}
+
+pub fn app_with_actor_api_key_and_relayer(
+    market_id: impl Into<String>,
+    boot_mode: ReadyBootMode,
+    journal_mode: JournalMode,
+    market: MarketSpec,
+    actor: MarketActorHandle,
+    api_key: Option<String>,
+    relayer: RelayerBootConfig,
+) -> Router {
+    app_with_actor_api_key_and_relayer_and_outbox(
+        market_id,
+        boot_mode,
+        journal_mode,
+        market,
+        actor,
+        api_key,
+        relayer,
         None,
+    )
+}
+
+fn app_with_actor_api_key_and_relayer_and_outbox(
+    market_id: impl Into<String>,
+    boot_mode: ReadyBootMode,
+    journal_mode: JournalMode,
+    market: MarketSpec,
+    actor: MarketActorHandle,
+    api_key: Option<String>,
+    relayer: RelayerBootConfig,
+    settlement_outbox: Option<PostgresEventJournal>,
+) -> Router {
+    let (settlement_config, worker_config) = match relayer {
+        RelayerBootConfig::Disabled => (None, None),
+        RelayerBootConfig::Enabled(config) => (Some(config.bridge), Some(config)),
+    };
+
+    app_with_actor_api_key_settlement_and_worker(
+        market_id,
+        boot_mode,
+        journal_mode,
+        market,
+        actor,
+        api_key,
+        settlement_config,
+        worker_config,
+        settlement_outbox,
     )
 }
 
@@ -373,7 +485,41 @@ pub fn app_with_actor_api_key_and_settlement(
     api_key: Option<String>,
     settlement_config: Option<SettlementBridgeConfig>,
 ) -> Router {
+    app_with_actor_api_key_settlement_and_worker(
+        market_id,
+        boot_mode,
+        journal_mode,
+        market,
+        actor,
+        api_key,
+        settlement_config,
+        None,
+        None,
+    )
+}
+
+fn app_with_actor_api_key_settlement_and_worker(
+    market_id: impl Into<String>,
+    boot_mode: ReadyBootMode,
+    journal_mode: JournalMode,
+    market: MarketSpec,
+    actor: MarketActorHandle,
+    api_key: Option<String>,
+    settlement_config: Option<SettlementBridgeConfig>,
+    worker_config: Option<RelayerWorkerConfig>,
+    settlement_outbox: Option<PostgresEventJournal>,
+) -> Router {
     let metrics = ServiceMetrics::default();
+    let settlement = SettlementEdgeState::default();
+    if let Some(worker_config) = worker_config {
+        spawn_settlement_worker(
+            settlement.clone(),
+            settlement_outbox.clone(),
+            metrics.clone(),
+            worker_config,
+        );
+    }
+
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -395,7 +541,8 @@ pub fn app_with_actor_api_key_and_settlement(
             journal_mode,
             market,
             actor,
-            settlement: SettlementEdgeState::default(),
+            settlement,
+            settlement_outbox,
             metrics,
             api_key,
             settlement_config,
@@ -421,6 +568,124 @@ pub fn init_tracing() {
     let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
+fn spawn_settlement_worker(
+    settlement: SettlementEdgeState,
+    settlement_outbox: Option<PostgresEventJournal>,
+    metrics: ServiceMetrics,
+    config: RelayerWorkerConfig,
+) {
+    tokio::spawn(async move {
+        let settlement_authority =
+            match Keypair::try_from_base58_string(&config.settlement_authority_keypair) {
+                Ok(keypair) => keypair,
+                Err(error) => {
+                    warn!(error = %error, "settlement authority keypair rejected");
+                    return;
+                }
+            };
+        let payer = match Keypair::try_from_base58_string(&config.payer_keypair) {
+            Ok(keypair) => keypair,
+            Err(error) => {
+                warn!(error = %error, "settlement payer keypair rejected");
+                return;
+            }
+        };
+        let rpc_submitter = relayer::RpcSubmitter::new(
+            relayer::RpcBlockhashProvider::new(config.rpc_url.clone()),
+            relayer::InMemoryTransactionSigner::new(vec![settlement_authority, payer]),
+            relayer::RpcTransactionSender::new(config.rpc_url.clone()),
+        );
+        let confirming = relayer::ConfirmingSubmitter::new(
+            rpc_submitter,
+            relayer::PollingConfirmer::new(
+                relayer::RpcConfirmationPoller::new(config.rpc_url),
+                relayer::PollingPolicy::default(),
+            ),
+        );
+        let retrying = relayer::RetryingSubmitter::new(confirming, relayer::RetryPolicy::default());
+        let dead_lettering =
+            relayer::DeadLetteringSubmitter::new(retrying, relayer::RecordingDeadLetterSink::new());
+        let mut worker = relayer::SettlementRequestWorker::new(dead_lettering);
+        let interval = Duration::from_millis(config.interval_ms.max(1));
+
+        loop {
+            let work = claim_settlement_work(&settlement, settlement_outbox.as_ref()).await;
+            for item in work {
+                let report = worker.submit_requests([item.request]).await;
+                if let Some(submitted) = report.submitted.first() {
+                    metrics.record_settlement_requests_submitted(1);
+                    if let Some(outbox) = settlement_outbox.as_ref() {
+                        if let Some(outbox_id) = item.outbox_id {
+                            if let Err(error) = outbox
+                                .mark_settlement_submitted(outbox_id, submitted.signature)
+                                .await
+                            {
+                                warn!(error = %error, outbox_id, "settlement outbox update failed");
+                            }
+                        }
+                    }
+                } else if let Some(failure) = report.failed.first() {
+                    metrics.record_settlement_requests_failed(1);
+                    if let Some(outbox) = settlement_outbox.as_ref() {
+                        if let Some(outbox_id) = item.outbox_id {
+                            if let Err(error) = outbox
+                                .mark_settlement_failed(outbox_id, &format!("{:?}", failure.error))
+                                .await
+                            {
+                                warn!(error = %error, outbox_id, "settlement outbox update failed");
+                            }
+                        }
+                    }
+                    warn!(error = ?failure.error, "settlement worker reported failed submission");
+                }
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SettlementWorkItem {
+    outbox_id: Option<i64>,
+    request: relayer::SignedSettlementRequest,
+}
+
+async fn claim_settlement_work(
+    settlement: &SettlementEdgeState,
+    settlement_outbox: Option<&PostgresEventJournal>,
+) -> Vec<SettlementWorkItem> {
+    if let Some(outbox) = settlement_outbox {
+        return match outbox
+            .claim_pending_settlements(SETTLEMENT_WORKER_BATCH_LIMIT)
+            .await
+        {
+            Ok(items) => items.into_iter().map(SettlementWorkItem::from).collect(),
+            Err(error) => {
+                warn!(error = %error, "settlement outbox claim failed");
+                Vec::new()
+            }
+        };
+    }
+
+    settlement
+        .drain_queued_settlement_requests()
+        .into_iter()
+        .map(|request| SettlementWorkItem {
+            outbox_id: None,
+            request,
+        })
+        .collect()
+}
+
+impl From<SettlementOutboxItem> for SettlementWorkItem {
+    fn from(item: SettlementOutboxItem) -> Self {
+        Self {
+            outbox_id: Some(item.outbox_id),
+            request: item.request,
+        }
+    }
+}
+
 pub fn http_addr_from_env() -> Result<SocketAddr, StartupError> {
     http_addr_from_value(env::var(EXCHANGE_HTTP_ADDR_ENV).ok().as_deref())
 }
@@ -437,15 +702,18 @@ pub struct BootConfig {
     pub mode: BootMode,
     pub database_url: Option<String>,
     pub api_key: Option<String>,
+    pub relayer: RelayerBootConfig,
 }
 
 impl BootConfig {
     pub fn from_env() -> Result<Self, StartupError> {
-        Self::from_values(
+        let mut config = Self::from_values(
             env::var(EXCHANGE_BOOT_MODE_ENV).ok().as_deref(),
             env::var(DATABASE_URL_ENV).ok().as_deref(),
             env::var(EXCHANGE_API_KEY_ENV).ok().as_deref(),
-        )
+        )?;
+        config.relayer = RelayerBootConfig::from_env()?;
+        Ok(config)
     }
 
     pub fn from_values(
@@ -467,8 +735,112 @@ impl BootConfig {
             mode,
             database_url,
             api_key,
+            relayer: RelayerBootConfig::Disabled,
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayerBootConfig {
+    Disabled,
+    Enabled(RelayerWorkerConfig),
+}
+
+impl RelayerBootConfig {
+    fn from_env() -> Result<Self, StartupError> {
+        if !env_flag(env::var(EXCHANGE_RELAYER_ENABLED_ENV).ok().as_deref())? {
+            return Ok(Self::Disabled);
+        }
+
+        let rpc_url = required_env(EXCHANGE_SOLANA_RPC_URL_ENV)?;
+        let market_id = parse_market_id_env(EXCHANGE_RELAYER_MARKET_ID_ENV)?;
+        let settlement_authority = parse_pubkey_env(EXCHANGE_RELAYER_SETTLEMENT_AUTHORITY_ENV)?;
+        let base_mint = parse_pubkey_env(EXCHANGE_RELAYER_BASE_MINT_ENV)?;
+        let quote_mint = parse_pubkey_env(EXCHANGE_RELAYER_QUOTE_MINT_ENV)?;
+        let payer = parse_pubkey_env(EXCHANGE_RELAYER_PAYER_ENV)?;
+        let settlement_authority_keypair =
+            required_env(EXCHANGE_RELAYER_SETTLEMENT_AUTHORITY_KEYPAIR_ENV)?;
+        let payer_keypair = required_env(EXCHANGE_RELAYER_PAYER_KEYPAIR_ENV)?;
+        validate_keypair(
+            &settlement_authority_keypair,
+            EXCHANGE_RELAYER_SETTLEMENT_AUTHORITY_KEYPAIR_ENV,
+        )?;
+        validate_keypair(&payer_keypair, EXCHANGE_RELAYER_PAYER_KEYPAIR_ENV)?;
+        let interval_ms = env::var(EXCHANGE_RELAYER_INTERVAL_MS_ENV)
+            .ok()
+            .as_deref()
+            .map(parse_interval_ms)
+            .transpose()?
+            .unwrap_or(DEFAULT_RELAYER_INTERVAL_MS);
+
+        Ok(Self::Enabled(RelayerWorkerConfig {
+            bridge: SettlementBridgeConfig {
+                market_id,
+                settlement_authority,
+                base_mint,
+                quote_mint,
+                payer,
+            },
+            rpc_url,
+            settlement_authority_keypair,
+            payer_keypair,
+            interval_ms,
+        }))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayerWorkerConfig {
+    pub bridge: SettlementBridgeConfig,
+    pub rpc_url: String,
+    pub settlement_authority_keypair: String,
+    pub payer_keypair: String,
+    pub interval_ms: u64,
+}
+
+fn env_flag(value: Option<&str>) -> Result<bool, StartupError> {
+    match value.unwrap_or("") {
+        "" | "0" | "false" | "False" | "FALSE" => Ok(false),
+        "1" | "true" | "True" | "TRUE" => Ok(true),
+        value => Err(StartupError::Config(format!(
+            "invalid {EXCHANGE_RELAYER_ENABLED_ENV}: {value}"
+        ))),
+    }
+}
+
+fn required_env(name: &'static str) -> Result<String, StartupError> {
+    env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| StartupError::Config(format!("{name} is required")))
+}
+
+fn parse_market_id_env(name: &'static str) -> Result<MarketId, StartupError> {
+    let value = required_env(name)?;
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|error| StartupError::Config(format!("invalid {name}: {error}")))?;
+    MarketId::new(parsed).map_err(|error| StartupError::Config(format!("invalid {name}: {error}")))
+}
+
+fn parse_pubkey_env(name: &'static str) -> Result<Pubkey, StartupError> {
+    let value = required_env(name)?;
+    Pubkey::from_str(&value)
+        .map_err(|error| StartupError::Config(format!("invalid {name}: {error}")))
+}
+
+fn parse_interval_ms(value: &str) -> Result<u64, StartupError> {
+    value.parse::<u64>().map_err(|error| {
+        StartupError::Config(format!(
+            "invalid {EXCHANGE_RELAYER_INTERVAL_MS_ENV}: {error}"
+        ))
+    })
+}
+
+fn validate_keypair(value: &str, name: &'static str) -> Result<(), StartupError> {
+    Keypair::try_from_base58_string(value)
+        .map(|_| ())
+        .map_err(|error| StartupError::Config(format!("invalid {name}: {error}")))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -589,11 +961,17 @@ async fn ready(
 }
 
 async fn metrics_json_endpoint(State(state): State<ServiceState>) -> Json<MetricsResponse> {
-    Json(state.metrics.snapshot(state.actor.metrics_snapshot()))
+    Json(state.metrics.snapshot(
+        state.actor.metrics_snapshot(),
+        pending_settlement_count(&state).await,
+    ))
 }
 
 async fn prometheus_metrics_endpoint(State(state): State<ServiceState>) -> impl IntoResponse {
-    let metrics = state.metrics.snapshot(state.actor.metrics_snapshot());
+    let metrics = state.metrics.snapshot(
+        state.actor.metrics_snapshot(),
+        pending_settlement_count(&state).await,
+    );
     (
         [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
         metrics.to_prometheus_text(),
@@ -706,7 +1084,7 @@ async fn place_order(
     match reply {
         MarketReply::OrderPlaced { fills } => {
             state.metrics.record_order_accepted();
-            queue_settlement_requests(&state, request.command_id, order, &fills, &request_id);
+            queue_settlement_requests(&state, request.command_id, order, &fills, &request_id).await;
             info!(
                 request_id = %request_id.as_str(),
                 command_id = request.command_id,
@@ -731,7 +1109,7 @@ async fn place_order(
     }
 }
 
-fn queue_settlement_requests(
+async fn queue_settlement_requests(
     state: &ServiceState,
     command_id: u128,
     taker_order: Order,
@@ -775,7 +1153,22 @@ fn queue_settlement_requests(
     match bridge.requests_from_batch(&batch, &state.settlement, first_settlement_id) {
         Ok(requests) => {
             let settlement_count = requests.len();
-            state.settlement.queue_settlement_requests(requests);
+            if let Some(outbox) = state.settlement_outbox.as_ref() {
+                if let Err(error) = outbox.enqueue_settlement_requests(&requests).await {
+                    warn!(
+                        request_id = %request_id.as_str(),
+                        error = %error,
+                        settlement_count,
+                        "settlement outbox enqueue failed"
+                    );
+                    return;
+                }
+            } else {
+                state.settlement.queue_settlement_requests(requests);
+            }
+            state
+                .metrics
+                .record_settlement_requests_queued(settlement_count);
             info!(
                 request_id = %request_id.as_str(),
                 settlement_count,
@@ -848,8 +1241,22 @@ async fn pending_settlements(
     State(state): State<ServiceState>,
 ) -> Json<PendingSettlementsResponse> {
     Json(PendingSettlementsResponse {
-        queued: state.settlement.queued_settlement_count(),
+        queued: pending_settlement_count(&state).await,
     })
+}
+
+async fn pending_settlement_count(state: &ServiceState) -> usize {
+    if let Some(outbox) = state.settlement_outbox.as_ref() {
+        return match outbox.settlement_pending_count().await {
+            Ok(count) => count,
+            Err(error) => {
+                warn!(error = %error, "settlement outbox pending count failed");
+                0
+            }
+        };
+    }
+
+    state.settlement.queued_settlement_count()
 }
 
 async fn snapshot(
@@ -1061,6 +1468,10 @@ pub struct MetricsResponse {
     pub snapshot_requests_total: u64,
     pub deposits_accepted_total: u64,
     pub orders_accepted_total: u64,
+    pub settlement_requests_queued_total: u64,
+    pub settlement_requests_submitted_total: u64,
+    pub settlement_requests_failed_total: u64,
+    pub settlement_requests_pending: u64,
     pub api_errors_total: u64,
     pub actor_commands_received_total: u64,
     pub actor_commands_accepted_total: u64,
@@ -1104,6 +1515,30 @@ impl MetricsResponse {
         );
         write_counter(
             &mut output,
+            "exchange_settlement_requests_queued_total",
+            "Total settlement requests queued by the exchange service.",
+            self.settlement_requests_queued_total,
+        );
+        write_counter(
+            &mut output,
+            "exchange_settlement_requests_submitted_total",
+            "Total settlement requests submitted by the relayer worker.",
+            self.settlement_requests_submitted_total,
+        );
+        write_counter(
+            &mut output,
+            "exchange_settlement_requests_failed_total",
+            "Total settlement requests failed by the relayer worker.",
+            self.settlement_requests_failed_total,
+        );
+        write_gauge(
+            &mut output,
+            "exchange_settlement_requests_pending",
+            "Settlement requests currently waiting in memory.",
+            self.settlement_requests_pending,
+        );
+        write_counter(
+            &mut output,
             "exchange_api_errors_total",
             "Total API errors returned by the exchange service.",
             self.api_errors_total,
@@ -1143,6 +1578,14 @@ impl MetricsResponse {
 }
 
 fn write_counter(output: &mut String, name: &str, help: &str, value: u64) {
+    write_metric(output, name, help, "counter", value);
+}
+
+fn write_gauge(output: &mut String, name: &str, help: &str, value: u64) {
+    write_metric(output, name, help, "gauge", value);
+}
+
+fn write_metric(output: &mut String, name: &str, help: &str, kind: &str, value: u64) {
     output.push_str("# HELP ");
     output.push_str(name);
     output.push(' ');
@@ -1150,7 +1593,9 @@ fn write_counter(output: &mut String, name: &str, help: &str, value: u64) {
     output.push('\n');
     output.push_str("# TYPE ");
     output.push_str(name);
-    output.push_str(" counter\n");
+    output.push(' ');
+    output.push_str(kind);
+    output.push('\n');
     output.push_str(name);
     output.push(' ');
     output.push_str(&value.to_string());
@@ -1311,6 +1756,7 @@ mod tests {
                 mode: BootMode::Local,
                 database_url: None,
                 api_key: None,
+                relayer: RelayerBootConfig::Disabled,
             }
         );
     }
@@ -1323,6 +1769,7 @@ mod tests {
                 mode: BootMode::Local,
                 database_url: None,
                 api_key: Some("secret".to_owned()),
+                relayer: RelayerBootConfig::Disabled,
             }
         );
     }
@@ -1345,6 +1792,7 @@ mod tests {
                 mode: BootMode::Postgres,
                 database_url: Some("postgres://localhost/exchange".to_owned()),
                 api_key: None,
+                relayer: RelayerBootConfig::Disabled,
             }
         );
     }
@@ -1383,6 +1831,7 @@ mod tests {
             mode: BootMode::Local,
             database_url: None,
             api_key: None,
+            relayer: RelayerBootConfig::Disabled,
         })
         .await
         .unwrap();
@@ -1417,6 +1866,7 @@ mod tests {
             mode: BootMode::Local,
             database_url: None,
             api_key: Some("secret".to_owned()),
+            relayer: RelayerBootConfig::Disabled,
         })
         .await
         .unwrap();
@@ -1454,6 +1904,7 @@ mod tests {
             mode: BootMode::Local,
             database_url: None,
             api_key: Some("secret".to_owned()),
+            relayer: RelayerBootConfig::Disabled,
         })
         .await
         .unwrap();
@@ -1813,6 +2264,10 @@ mod tests {
                 "snapshot_requests_total": 0,
                 "deposits_accepted_total": 1,
                 "orders_accepted_total": 0,
+                "settlement_requests_queued_total": 0,
+                "settlement_requests_submitted_total": 0,
+                "settlement_requests_failed_total": 0,
+                "settlement_requests_pending": 0,
                 "api_errors_total": 1,
                 "actor_commands_received_total": 2,
                 "actor_commands_accepted_total": 1,
@@ -1873,6 +2328,10 @@ mod tests {
                 "snapshot_requests_total": 1,
                 "deposits_accepted_total": 0,
                 "orders_accepted_total": 0,
+                "settlement_requests_queued_total": 0,
+                "settlement_requests_submitted_total": 0,
+                "settlement_requests_failed_total": 0,
+                "settlement_requests_pending": 0,
                 "api_errors_total": 0,
                 "actor_commands_received_total": 2,
                 "actor_commands_accepted_total": 2,
@@ -2149,10 +2608,13 @@ mod tests {
     #[sqlx::test(migrations = "../../crates/persistence/migrations")]
     #[ignore = "requires DATABASE_URL"]
     async fn app_with_postgres_replays_events_after_restart(pool: sqlx::PgPool) {
-        let first_service =
-            app_with_postgres_journal(PostgresEventJournal::from_pool(pool.clone()), None)
-                .await
-                .unwrap();
+        let first_service = app_with_postgres_journal(
+            PostgresEventJournal::from_pool(pool.clone()),
+            None,
+            RelayerBootConfig::Disabled,
+        )
+        .await
+        .unwrap();
 
         let deposit = first_service
             .oneshot(
@@ -2175,10 +2637,13 @@ mod tests {
             .unwrap();
         assert_eq!(deposit.status(), StatusCode::OK);
 
-        let second_service =
-            app_with_postgres_journal(PostgresEventJournal::from_pool(pool.clone()), None)
-                .await
-                .unwrap();
+        let second_service = app_with_postgres_journal(
+            PostgresEventJournal::from_pool(pool.clone()),
+            None,
+            RelayerBootConfig::Disabled,
+        )
+        .await
+        .unwrap();
 
         let ready = second_service
             .clone()

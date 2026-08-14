@@ -11,11 +11,12 @@ async-trait.workspace = true
 axum = { workspace = true, features = ["json"] }
 domain.workspace = true
 persistence.workspace = true
-relayer.workspace = true
+relayer = { workspace = true, features = ["rpc"] }
 runtime.workspace = true
 serde = { workspace = true, features = ["derive"] }
+solana-keypair.workspace = true
 spot_settlement = { path = "../../programs/spot-settlement", features = ["no-entrypoint"] }
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
