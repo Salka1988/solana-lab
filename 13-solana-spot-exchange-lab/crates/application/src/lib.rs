@@ -145,8 +145,16 @@ impl ExchangeApplication {
         }
 
         let reservation = Reservation::for_order(&order, self.market)?;
-        self.balances.reserve(reservation)?;
-        self.matching.place_order(order).map_err(Error::from)
+        let mut balances = self.balances.clone();
+        let mut matching = self.matching.clone();
+
+        balances.reserve(reservation)?;
+        let fills = matching.place_order(order).map_err(Error::from)?;
+
+        self.balances = balances;
+        self.matching = matching;
+
+        Ok(fills)
     }
 
     fn record_applied_event(&mut self, event: Event) -> Result<()> {

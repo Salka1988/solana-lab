@@ -2,7 +2,7 @@ use solana_m0_test_support as test_support;
 use {
     anchor_lang::{
         prelude::Pubkey,
-        solana_program::{instruction::Instruction, system_program},
+        solana_program::{instruction::Instruction, system_instruction, system_program},
         AccountSerialize, InstructionData, ToAccountMetas,
     },
     litesvm::LiteSVM,
@@ -487,6 +487,14 @@ fn signed_fill_instructions(
     ]
 }
 
+fn harmless_system_instruction(fixture: &Fixture) -> Instruction {
+    system_instruction::transfer(
+        &fixture.settlement_authority.pubkey(),
+        &fixture.buyer.pubkey(),
+        1,
+    )
+}
+
 fn send_transaction_with_metadata(
     svm: &mut LiteSVM,
     fee_payer: Pubkey,
@@ -880,6 +888,58 @@ fn signed_settlement_rejects_mismatched_ed25519_message() {
         &wrong_signature,
         fixture.buyer.pubkey().as_array(),
     );
+
+    test_support::assert_result_fails_with(
+        test_support::send_transaction(
+            &mut svm,
+            fixture.settlement_authority.pubkey(),
+            instructions,
+            &[&fixture.settlement_authority],
+        ),
+        "InvalidEd25519Instruction",
+    );
+}
+
+#[test]
+fn signed_settlement_rejects_instruction_between_buyer_and_seller_signatures() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        115,
+        SIGNED_FILL_QUANTITY,
+    );
+    let mut instructions = signed_fill_instructions(&fixture, args);
+    instructions.insert(1, harmless_system_instruction(&fixture));
+
+    test_support::assert_result_fails_with(
+        test_support::send_transaction(
+            &mut svm,
+            fixture.settlement_authority.pubkey(),
+            instructions,
+            &[&fixture.settlement_authority],
+        ),
+        "InvalidEd25519Instruction",
+    );
+}
+
+#[test]
+fn signed_settlement_rejects_instruction_between_seller_signature_and_settlement() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        116,
+        SIGNED_FILL_QUANTITY,
+    );
+    let mut instructions = signed_fill_instructions(&fixture, args);
+    instructions.insert(2, harmless_system_instruction(&fixture));
 
     test_support::assert_result_fails_with(
         test_support::send_transaction(
