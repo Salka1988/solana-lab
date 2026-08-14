@@ -4,6 +4,7 @@ use core::fmt;
 use std::{
     env,
     sync::atomic::{AtomicU64, Ordering},
+    sync::Arc,
 };
 
 use async_trait::async_trait;
@@ -62,6 +63,69 @@ pub struct ServiceState {
     journal_mode: JournalMode,
     market: MarketSpec,
     actor: MarketActorHandle,
+    metrics: ServiceMetrics,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ServiceMetrics {
+    inner: Arc<ServiceMetricsInner>,
+}
+
+#[derive(Debug, Default)]
+struct ServiceMetricsInner {
+    http_requests_total: AtomicU64,
+    ready_checks_total: AtomicU64,
+    snapshot_requests_total: AtomicU64,
+    deposits_accepted_total: AtomicU64,
+    orders_accepted_total: AtomicU64,
+    api_errors_total: AtomicU64,
+}
+
+impl ServiceMetrics {
+    fn snapshot(&self) -> MetricsResponse {
+        MetricsResponse {
+            http_requests_total: self.inner.http_requests_total.load(Ordering::Relaxed),
+            ready_checks_total: self.inner.ready_checks_total.load(Ordering::Relaxed),
+            snapshot_requests_total: self.inner.snapshot_requests_total.load(Ordering::Relaxed),
+            deposits_accepted_total: self.inner.deposits_accepted_total.load(Ordering::Relaxed),
+            orders_accepted_total: self.inner.orders_accepted_total.load(Ordering::Relaxed),
+            api_errors_total: self.inner.api_errors_total.load(Ordering::Relaxed),
+        }
+    }
+
+    fn record_http_request(&self) {
+        self.inner
+            .http_requests_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_ready_check(&self) {
+        self.inner
+            .ready_checks_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_snapshot_request(&self) {
+        self.inner
+            .snapshot_requests_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_deposit_accepted(&self) {
+        self.inner
+            .deposits_accepted_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_order_accepted(&self) {
+        self.inner
+            .orders_accepted_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_api_error(&self) {
+        self.inner.api_errors_total.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -145,12 +209,18 @@ pub fn app_with_actor(
     market: MarketSpec,
     actor: MarketActorHandle,
 ) -> Router {
+    let metrics = ServiceMetrics::default();
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/metrics", get(metrics_endpoint))
         .route("/deposits", post(credit_deposit))
         .route("/orders", post(place_order))
         .route("/markets/{market_id}/snapshot", get(snapshot))
+        .layer(middleware::from_fn_with_state(
+            metrics.clone(),
+            metrics_middleware,
+        ))
         .layer(middleware::from_fn(request_id_middleware))
         .with_state(ServiceState {
             market_id: market_id.into(),
@@ -158,6 +228,7 @@ pub fn app_with_actor(
             journal_mode,
             market,
             actor,
+            metrics,
         })
 }
 
@@ -291,6 +362,15 @@ async fn request_id_middleware(mut request: Request<Body>, next: Next) -> Respon
     response
 }
 
+async fn metrics_middleware(
+    State(metrics): State<ServiceMetrics>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    metrics.record_http_request();
+    next.run(request).await
+}
+
 async fn health(Extension(request_id): Extension<RequestId>) -> Json<HealthResponse> {
     info!(request_id = %request_id.as_str(), "health checked");
     Json(HealthResponse { status: "ok" })
@@ -300,7 +380,10 @@ async fn ready(
     State(state): State<ServiceState>,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ReadyResponse>, ApiError> {
-    let snapshot = actor_snapshot(&state.actor, &request_id).await?;
+    state.metrics.record_ready_check();
+    let snapshot = actor_snapshot(&state.actor, &request_id)
+        .await
+        .map_err(|error| record_api_error(error, &state.metrics))?;
     info!(
         request_id = %request_id.as_str(),
         market_id = %state.market_id,
@@ -316,6 +399,10 @@ async fn ready(
     }))
 }
 
+async fn metrics_endpoint(State(state): State<ServiceState>) -> Json<MetricsResponse> {
+    Json(state.metrics.snapshot())
+}
+
 async fn credit_deposit(
     State(state): State<ServiceState>,
     Extension(request_id): Extension<RequestId>,
@@ -329,19 +416,27 @@ async fn credit_deposit(
         amount = request.amount,
         "credit deposit requested"
     );
+    let command_id =
+        command_id(request.command_id).map_err(|error| record_api_error(error, &state.metrics))?;
+    let trader_id =
+        trader_id(request.trader_id).map_err(|error| record_api_error(error, &state.metrics))?;
+    let asset_id =
+        asset_id(request.asset_id).map_err(|error| record_api_error(error, &state.metrics))?;
     let reply = state
         .actor
         .credit_deposit_with_request_id(
             Some(request_id.as_str().to_owned()),
-            command_id(request.command_id)?,
-            trader_id(request.trader_id)?,
-            asset_id(request.asset_id)?,
+            command_id,
+            trader_id,
+            asset_id,
             BalanceAmount::new(request.amount),
         )
-        .await?;
+        .await
+        .map_err(|error| record_api_error(ApiError::from(error), &state.metrics))?;
 
     match reply {
         MarketReply::DepositCredited => {
+            state.metrics.record_deposit_accepted();
             info!(
                 request_id = %request_id.as_str(),
                 command_id = request.command_id,
@@ -370,30 +465,46 @@ async fn place_order(
         sequence = request.sequence,
         "order requested"
     );
+    let order_id =
+        order_id(request.order_id).map_err(|error| record_api_error(error, &state.metrics))?;
+    let trader_id =
+        trader_id(request.trader_id).map_err(|error| record_api_error(error, &state.metrics))?;
+    let market_id = MarketId::new(request.market_id)
+        .map_err(|error| record_api_error(ApiError::from(error), &state.metrics))?;
+    let side = side(request.side).map_err(|error| record_api_error(error, &state.metrics))?;
+    let price = Price::new(request.price)
+        .map_err(|error| record_api_error(ApiError::from(error), &state.metrics))?;
+    let quantity = Quantity::new(request.quantity)
+        .map_err(|error| record_api_error(ApiError::from(error), &state.metrics))?;
+    let sequence = OrderSequence::new(request.sequence)
+        .map_err(|error| record_api_error(ApiError::from(error), &state.metrics))?;
     let order = Order::new(
-        order_id(request.order_id)?,
-        trader_id(request.trader_id)?,
-        MarketId::new(request.market_id)?,
-        side(request.side)?,
-        Price::new(request.price)?,
-        Quantity::new(request.quantity)?,
-        OrderSequence::new(request.sequence)?,
+        order_id, trader_id, market_id, side, price, quantity, sequence,
     );
 
-    state.market.validate_price(order.price())?;
-    state.market.validate_quantity(order.original_quantity())?;
+    state
+        .market
+        .validate_price(order.price())
+        .map_err(|error| record_api_error(ApiError::from(error), &state.metrics))?;
+    state
+        .market
+        .validate_quantity(order.original_quantity())
+        .map_err(|error| record_api_error(ApiError::from(error), &state.metrics))?;
 
     let reply = state
         .actor
         .place_order_with_request_id(
             Some(request_id.as_str().to_owned()),
-            command_id(request.command_id)?,
+            command_id(request.command_id)
+                .map_err(|error| record_api_error(error, &state.metrics))?,
             order,
         )
-        .await?;
+        .await
+        .map_err(|error| record_api_error(ApiError::from(error), &state.metrics))?;
 
     match reply {
         MarketReply::OrderPlaced { fills } => {
+            state.metrics.record_order_accepted();
             info!(
                 request_id = %request_id.as_str(),
                 command_id = request.command_id,
@@ -423,6 +534,7 @@ async fn snapshot(
     Extension(request_id): Extension<RequestId>,
     Path(market_id): Path<String>,
 ) -> Result<Json<SnapshotResponse>, ApiError> {
+    state.metrics.record_snapshot_request();
     if market_id != state.market_id {
         warn!(
             request_id = %request_id.as_str(),
@@ -430,10 +542,13 @@ async fn snapshot(
             configured_market_id = %state.market_id,
             "unknown market snapshot requested"
         );
+        state.metrics.record_api_error();
         return Err(ApiError::NotFound);
     }
 
-    let snapshot = actor_snapshot(&state.actor, &request_id).await?;
+    let snapshot = actor_snapshot(&state.actor, &request_id)
+        .await
+        .map_err(|error| record_api_error(error, &state.metrics))?;
     info!(
         request_id = %request_id.as_str(),
         market_id = %market_id,
@@ -444,6 +559,11 @@ async fn snapshot(
         market_id,
         event_count: snapshot.event_count,
     }))
+}
+
+fn record_api_error(error: ApiError, metrics: &ServiceMetrics) -> ApiError {
+    metrics.record_api_error();
+    error
 }
 
 async fn actor_snapshot(
@@ -546,6 +666,16 @@ pub struct ReadyResponse {
 pub struct SnapshotResponse {
     pub market_id: String,
     pub event_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct MetricsResponse {
+    pub http_requests_total: u64,
+    pub ready_checks_total: u64,
+    pub snapshot_requests_total: u64,
+    pub deposits_accepted_total: u64,
+    pub orders_accepted_total: u64,
+    pub api_errors_total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -738,6 +868,151 @@ mod tests {
                 "boot_mode": "local",
                 "journal_mode": "noop",
                 "event_count": 0
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_counts_http_requests_acceptance_and_errors() {
+        let service = app();
+
+        let health = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let deposit = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/deposits")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "command_id": 1,
+                            "trader_id": 1,
+                            "asset_id": 1,
+                            "amount": 7
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deposit.status(), StatusCode::OK);
+
+        let unfunded_order = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/orders")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "command_id": 2,
+                            "order_id": 1,
+                            "trader_id": 1,
+                            "market_id": 1,
+                            "side": "bid",
+                            "price": 100,
+                            "quantity": 7,
+                            "sequence": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unfunded_order.status(), StatusCode::CONFLICT);
+
+        let metrics = service
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(metrics.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(metrics).await,
+            json!({
+                "http_requests_total": 4,
+                "ready_checks_total": 0,
+                "snapshot_requests_total": 0,
+                "deposits_accepted_total": 1,
+                "orders_accepted_total": 0,
+                "api_errors_total": 1
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_counts_readiness_and_snapshots() {
+        let service = app();
+
+        let ready = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ready.status(), StatusCode::OK);
+
+        let snapshot = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/markets/SOL-USDC/snapshot")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.status(), StatusCode::OK);
+
+        let metrics = service
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(metrics.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(metrics).await,
+            json!({
+                "http_requests_total": 3,
+                "ready_checks_total": 1,
+                "snapshot_requests_total": 1,
+                "deposits_accepted_total": 0,
+                "orders_accepted_total": 0,
+                "api_errors_total": 0
             })
         );
     }
