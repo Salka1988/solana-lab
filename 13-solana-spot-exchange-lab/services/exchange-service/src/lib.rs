@@ -187,9 +187,13 @@ pub async fn app_from_config(config: BootConfig) -> Result<Router, StartupError>
 }
 
 pub async fn app_with_postgres(database_url: &str) -> Result<Router, StartupError> {
-    let market = default_market();
     info!("connecting postgres event journal");
     let journal = PostgresEventJournal::connect(database_url).await?;
+    app_with_postgres_journal(journal).await
+}
+
+async fn app_with_postgres_journal(journal: PostgresEventJournal) -> Result<Router, StartupError> {
+    let market = default_market();
     info!("running postgres migrations");
     journal.migrate().await?;
 
@@ -1249,5 +1253,84 @@ mod tests {
         assert_eq!(body["boot_mode"], "postgres");
         assert_eq!(body["journal_mode"], "postgres");
         assert!(body["event_count"].is_number());
+    }
+
+    #[sqlx::test(migrations = "../../crates/persistence/migrations")]
+    #[ignore = "requires DATABASE_URL"]
+    async fn app_with_postgres_replays_events_after_restart(pool: sqlx::PgPool) {
+        let first_service =
+            app_with_postgres_journal(PostgresEventJournal::from_pool(pool.clone()))
+                .await
+                .unwrap();
+
+        let deposit = first_service
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/deposits")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "command_id": 1,
+                            "trader_id": 1,
+                            "asset_id": 1,
+                            "amount": 7
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deposit.status(), StatusCode::OK);
+
+        let second_service =
+            app_with_postgres_journal(PostgresEventJournal::from_pool(pool.clone()))
+                .await
+                .unwrap();
+
+        let ready = second_service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ready.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(ready).await,
+            json!({
+                "status": "ready",
+                "market_id": "SOL-USDC",
+                "boot_mode": "postgres",
+                "journal_mode": "postgres",
+                "event_count": 1
+            })
+        );
+
+        let duplicate = second_service
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/deposits")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "command_id": 1,
+                            "trader_id": 2,
+                            "asset_id": 1,
+                            "amount": 7
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
     }
 }
