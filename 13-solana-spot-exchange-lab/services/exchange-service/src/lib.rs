@@ -26,7 +26,9 @@ use domain::{
     AssetId, BalanceAmount, LotSize, MarketId, MarketSpec, Order, OrderId, OrderSequence, Price,
     Quantity, Side, TickSize, TraderId,
 };
-use persistence::{PersistenceError, PostgresEventJournal, SettlementOutboxItem};
+use persistence::{
+    PersistenceError, PostgresEventJournal, SettlementOutboxItem, SettlementOutboxRow,
+};
 use runtime::{MarketActorHandle, MarketReply, MarketSnapshot};
 use serde::{Deserialize, Serialize};
 use solana_keypair::Keypair;
@@ -53,6 +55,7 @@ pub const X_API_KEY_HEADER: &str = "x-api-key";
 pub const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const DEFAULT_RELAYER_INTERVAL_MS: u64 = 1_000;
 const SETTLEMENT_WORKER_BATCH_LIMIT: i64 = 32;
+const SETTLEMENT_OUTBOX_VIEW_LIMIT: i64 = 50;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -529,6 +532,7 @@ fn app_with_actor_api_key_settlement_and_worker(
         .route("/orders", post(place_order))
         .route("/signed-orders", post(register_signed_order))
         .route("/settlements/pending", get(pending_settlements))
+        .route("/settlements/outbox", get(list_settlement_outbox))
         .route("/markets/{market_id}/snapshot", get(snapshot))
         .layer(middleware::from_fn_with_state(
             metrics.clone(),
@@ -1258,6 +1262,34 @@ async fn pending_settlements(
     })
 }
 
+async fn list_settlement_outbox(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SettlementOutboxRowResponse>>, ApiError> {
+    authorize_api_key(&state, &headers).map_err(|error| record_api_error(error, &state.metrics))?;
+
+    let Some(outbox) = state.settlement_outbox.as_ref() else {
+        return Ok(Json(Vec::new()));
+    };
+
+    let rows = outbox
+        .recent_settlement_outbox(SETTLEMENT_OUTBOX_VIEW_LIMIT)
+        .await
+        .map_err(|error| {
+            warn!(error = %error, "settlement outbox list failed");
+            record_api_error(
+                ApiError::Internal("settlement outbox list failed"),
+                &state.metrics,
+            )
+        })?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(SettlementOutboxRowResponse::from)
+            .collect(),
+    ))
+}
+
 async fn pending_settlement_count(state: &ServiceState) -> usize {
     if let Some(outbox) = state.settlement_outbox.as_ref() {
         return match outbox.settlement_pending_count().await {
@@ -1431,6 +1463,31 @@ pub struct SignedOrderResponse {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub struct PendingSettlementsResponse {
     pub queued: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SettlementOutboxRowResponse {
+    pub outbox_id: i64,
+    pub status: String,
+    pub attempts: i32,
+    pub max_attempts: i32,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<SettlementOutboxRow> for SettlementOutboxRowResponse {
+    fn from(row: SettlementOutboxRow) -> Self {
+        Self {
+            outbox_id: row.outbox_id,
+            status: row.status,
+            attempts: row.attempts,
+            max_attempts: row.max_attempts,
+            last_error: row.last_error,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -2190,6 +2247,47 @@ mod tests {
 
         assert_eq!(pending.status(), StatusCode::OK);
         assert_eq!(response_json(pending).await, json!({ "queued": 1 }));
+    }
+
+    #[tokio::test]
+    async fn settlement_outbox_view_is_protected_and_empty_without_postgres() {
+        let market = default_market();
+        let actor = MarketActorHandle::spawn(market, 1024);
+        let service = app_with_actor_and_api_key(
+            MARKET_SOL_USDC,
+            ReadyBootMode::Local,
+            JournalMode::Noop,
+            market,
+            actor,
+            Some("secret".to_owned()),
+        );
+
+        let missing_key = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/settlements/outbox")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_key.status(), StatusCode::UNAUTHORIZED);
+
+        let accepted = service
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/settlements/outbox")
+                    .header(X_API_KEY_HEADER, "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(response_json(accepted).await, json!([]));
     }
 
     #[tokio::test]

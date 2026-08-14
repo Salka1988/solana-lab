@@ -22,6 +22,17 @@ pub struct SettlementOutboxItem {
     pub request: SignedSettlementRequest,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementOutboxRow {
+    pub outbox_id: i64,
+    pub status: String,
+    pub attempts: i32,
+    pub max_attempts: i32,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 impl PostgresEventJournal {
     pub async fn connect(database_url: &str) -> Result<Self, PersistenceError> {
         let pool = PgPoolOptions::new()
@@ -119,6 +130,43 @@ impl PostgresEventJournal {
         .await?;
         let pending: i64 = row.try_get("pending")?;
         Ok(usize::try_from(pending).unwrap_or(usize::MAX))
+    }
+
+    pub async fn recent_settlement_outbox(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<SettlementOutboxRow>, PersistenceError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT outbox_id,
+                   status,
+                   attempts,
+                   max_attempts,
+                   last_error,
+                   created_at::TEXT AS created_at,
+                   updated_at::TEXT AS updated_at
+            FROM settlement_outbox
+            ORDER BY outbox_id DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit.max(1))
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(SettlementOutboxRow {
+                    outbox_id: row.try_get("outbox_id")?,
+                    status: row.try_get("status")?,
+                    attempts: row.try_get("attempts")?,
+                    max_attempts: row.try_get("max_attempts")?,
+                    last_error: row.try_get("last_error")?,
+                    created_at: row.try_get("created_at")?,
+                    updated_at: row.try_get("updated_at")?,
+                })
+            })
+            .collect()
     }
 
     pub async fn claim_pending_settlements(
