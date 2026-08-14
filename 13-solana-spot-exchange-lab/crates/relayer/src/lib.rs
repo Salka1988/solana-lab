@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod application_bridge;
+
 use anchor_lang::{prelude::Pubkey, solana_program::instruction::Instruction};
 use async_trait::async_trait;
 use settlement_client::{
@@ -14,6 +16,11 @@ use solana_message::{Message, VersionedMessage};
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
+
+pub use application_bridge::{
+    ApplicationSettlementBridge, ApplicationSettlementBridgeError, SettlementSignedOrder,
+    SettlementSignedOrderSource,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstructionPlan {
