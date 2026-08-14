@@ -95,6 +95,28 @@ pub struct CancelSignedOrderAccounts {
     pub payer: Pubkey,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CancelSignedOrderFlowAccounts {
+    pub trader: Pubkey,
+    pub base_mint: Pubkey,
+    pub quote_mint: Pubkey,
+    pub payer: Pubkey,
+}
+
+impl CancelSignedOrderFlowAccounts {
+    pub fn market_config(self) -> Pubkey {
+        market_config_pda(self.base_mint, self.quote_mint).0
+    }
+
+    pub fn to_cancel_accounts(self) -> CancelSignedOrderAccounts {
+        CancelSignedOrderAccounts {
+            trader: self.trader,
+            market_config: self.market_config(),
+            payer: self.payer,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SignedSettlementInstructionBuilder {
     prefix_instructions: Vec<Instruction>,
@@ -216,6 +238,15 @@ impl CancelSignedOrderInstructionBuilder {
         instructions.push(cancel_signed_order_instruction(accounts, order_hash, order));
         instructions
     }
+
+    pub fn build_for_market(
+        self,
+        accounts: CancelSignedOrderFlowAccounts,
+        order_hash: [u8; 32],
+        order: spot_settlement::SignedOrderPayload,
+    ) -> Vec<Instruction> {
+        self.build(accounts.to_cancel_accounts(), order_hash, order)
+    }
 }
 
 pub fn cancel_signed_order_instructions(
@@ -224,6 +255,14 @@ pub fn cancel_signed_order_instructions(
     order: spot_settlement::SignedOrderPayload,
 ) -> Vec<Instruction> {
     CancelSignedOrderInstructionBuilder::new().build(accounts, order_hash, order)
+}
+
+pub fn cancel_signed_order_flow_instructions(
+    accounts: CancelSignedOrderFlowAccounts,
+    order_hash: [u8; 32],
+    order: spot_settlement::SignedOrderPayload,
+) -> Vec<Instruction> {
+    CancelSignedOrderInstructionBuilder::new().build_for_market(accounts, order_hash, order)
 }
 
 pub fn protocol_config_pda() -> (Pubkey, u8) {
@@ -450,6 +489,15 @@ mod tests {
         }
     }
 
+    fn cancel_flow_accounts() -> CancelSignedOrderFlowAccounts {
+        CancelSignedOrderFlowAccounts {
+            trader: pubkey(2),
+            base_mint: pubkey(11),
+            quote_mint: pubkey(12),
+            payer: pubkey(2),
+        }
+    }
+
     #[test]
     fn builder_places_signed_settlement_tail_after_prefix_instructions() {
         let prefix = system_program::ID;
@@ -567,6 +615,46 @@ mod tests {
         assert_eq!(instructions[0].data, vec![2, 64, 156, 0, 0]);
         assert_eq!(instructions[1].data, vec![3, 208, 7, 0, 0, 0, 0, 0, 0]);
         assert_eq!(instructions[2].program_id, spot_settlement::id());
+    }
+
+    #[test]
+    fn cancel_flow_accounts_derive_manual_cancel_accounts() {
+        let flow_accounts = cancel_flow_accounts();
+        let market_config = market_config_pda(flow_accounts.base_mint, flow_accounts.quote_mint).0;
+
+        assert_eq!(
+            flow_accounts.to_cancel_accounts(),
+            CancelSignedOrderAccounts {
+                trader: flow_accounts.trader,
+                market_config,
+                payer: flow_accounts.payer,
+            }
+        );
+    }
+
+    #[test]
+    fn cancel_flow_builder_matches_manual_cancel_builder() {
+        let flow_accounts = cancel_flow_accounts();
+        let market_config = flow_accounts.market_config();
+        let order = signed_order(
+            market_config,
+            flow_accounts.trader,
+            spot_settlement::SignedOrderSide::Bid,
+        );
+        let order_hash = [9; 32];
+
+        let manual = CancelSignedOrderInstructionBuilder::new().build(
+            flow_accounts.to_cancel_accounts(),
+            order_hash,
+            order,
+        );
+        let derived = CancelSignedOrderInstructionBuilder::new().build_for_market(
+            flow_accounts,
+            order_hash,
+            order,
+        );
+
+        assert_eq!(derived, manual);
     }
 
     #[test]

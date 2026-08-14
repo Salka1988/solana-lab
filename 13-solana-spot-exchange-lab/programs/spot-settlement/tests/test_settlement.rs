@@ -377,12 +377,8 @@ fn cancel_signed_order_ix(
     order_hash: [u8; 32],
     order: spot_settlement::SignedOrderPayload,
 ) -> Instruction {
-    settlement_client::cancel_signed_order_instructions(
-        settlement_client::CancelSignedOrderAccounts {
-            trader,
-            market_config: fixture.market.market_config,
-            payer,
-        },
+    settlement_client::cancel_signed_order_flow_instructions(
+        cancel_signed_order_flow_accounts(fixture, trader, payer),
         order_hash,
         order,
     )
@@ -398,15 +394,24 @@ fn cancel_signed_order_with_compute_budget(
 ) -> Vec<Instruction> {
     settlement_client::CancelSignedOrderInstructionBuilder::new()
         .with_cancel_signed_order_compute_budget()
-        .build(
-            settlement_client::CancelSignedOrderAccounts {
-                trader,
-                market_config: fixture.market.market_config,
-                payer,
-            },
+        .build_for_market(
+            cancel_signed_order_flow_accounts(fixture, trader, payer),
             order_hash,
             order,
         )
+}
+
+fn cancel_signed_order_flow_accounts(
+    fixture: &Fixture,
+    trader: Pubkey,
+    payer: Pubkey,
+) -> settlement_client::CancelSignedOrderFlowAccounts {
+    settlement_client::CancelSignedOrderFlowAccounts {
+        trader,
+        base_mint: fixture.market.base_mint,
+        quote_mint: fixture.market.quote_mint,
+        payer,
+    }
 }
 
 fn harmless_system_instruction(fixture: &Fixture) -> Instruction {
