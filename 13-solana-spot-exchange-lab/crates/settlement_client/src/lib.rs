@@ -10,6 +10,7 @@ use solana_ed25519_program::new_ed25519_instruction_with_signature;
 
 pub const TRUSTED_SETTLEMENT_COMPUTE_UNIT_LIMIT: u32 = 25_000;
 pub const SIGNED_SETTLEMENT_COMPUTE_UNIT_LIMIT: u32 = 100_000;
+pub const CANCEL_SIGNED_ORDER_COMPUTE_UNIT_LIMIT: u32 = 40_000;
 pub const DEFAULT_PRIORITY_FEE_MICRO_LAMPORTS: u64 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +34,13 @@ impl ComputeBudgetPreset {
         }
     }
 
+    pub const fn cancel_signed_order() -> Self {
+        Self {
+            unit_limit: CANCEL_SIGNED_ORDER_COMPUTE_UNIT_LIMIT,
+            micro_lamports: DEFAULT_PRIORITY_FEE_MICRO_LAMPORTS,
+        }
+    }
+
     pub const fn with_priority_fee(mut self, micro_lamports: u64) -> Self {
         self.micro_lamports = micro_lamports;
         self
@@ -47,6 +55,13 @@ pub struct SignedSettlementAccounts {
     pub seller: Pubkey,
     pub buyer_balance: Pubkey,
     pub seller_balance: Pubkey,
+    pub payer: Pubkey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CancelSignedOrderAccounts {
+    pub trader: Pubkey,
+    pub market_config: Pubkey,
     pub payer: Pubkey,
 }
 
@@ -108,6 +123,64 @@ pub fn signed_settlement_instructions(
     SignedSettlementInstructionBuilder::new().build(accounts, args)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CancelSignedOrderInstructionBuilder {
+    prefix_instructions: Vec<Instruction>,
+}
+
+impl CancelSignedOrderInstructionBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_prefix_instruction(mut self, instruction: Instruction) -> Self {
+        self.prefix_instructions.push(instruction);
+        self
+    }
+
+    pub fn with_compute_unit_limit(self, units: u32) -> Self {
+        self.with_prefix_instruction(ComputeBudgetInstruction::set_compute_unit_limit(units))
+    }
+
+    pub fn with_compute_unit_price(self, micro_lamports: u64) -> Self {
+        self.with_prefix_instruction(ComputeBudgetInstruction::set_compute_unit_price(
+            micro_lamports,
+        ))
+    }
+
+    pub fn with_compute_budget(self, units: u32, micro_lamports: u64) -> Self {
+        self.with_compute_unit_limit(units)
+            .with_compute_unit_price(micro_lamports)
+    }
+
+    pub fn with_compute_budget_preset(self, preset: ComputeBudgetPreset) -> Self {
+        self.with_compute_budget(preset.unit_limit, preset.micro_lamports)
+    }
+
+    pub fn with_cancel_signed_order_compute_budget(self) -> Self {
+        self.with_compute_budget_preset(ComputeBudgetPreset::cancel_signed_order())
+    }
+
+    pub fn build(
+        self,
+        accounts: CancelSignedOrderAccounts,
+        order_hash: [u8; 32],
+        order: spot_settlement::SignedOrderPayload,
+    ) -> Vec<Instruction> {
+        let mut instructions = self.prefix_instructions;
+        instructions.push(cancel_signed_order_instruction(accounts, order_hash, order));
+        instructions
+    }
+}
+
+pub fn cancel_signed_order_instructions(
+    accounts: CancelSignedOrderAccounts,
+    order_hash: [u8; 32],
+    order: spot_settlement::SignedOrderPayload,
+) -> Vec<Instruction> {
+    CancelSignedOrderInstructionBuilder::new().build(accounts, order_hash, order)
+}
+
 fn buyer_signature_instruction(
     buyer: Pubkey,
     args: spot_settlement::SignedFillArgs,
@@ -161,6 +234,25 @@ fn settle_signed_fill_instruction(
             settlement_receipt: settlement_receipt_pda(accounts.market_config, args.settlement_id),
             payer: accounts.payer,
             instructions_sysvar: solana_sdk_ids::sysvar::instructions::ID,
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn cancel_signed_order_instruction(
+    accounts: CancelSignedOrderAccounts,
+    order_hash: [u8; 32],
+    order: spot_settlement::SignedOrderPayload,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        spot_settlement::id(),
+        &spot_settlement::instruction::CancelSignedOrder { order_hash, order }.data(),
+        spot_settlement::accounts::CancelSignedOrder {
+            trader: accounts.trader,
+            market_config: accounts.market_config,
+            order_fill_state: order_fill_state_pda(accounts.market_config, order_hash),
+            payer: accounts.payer,
             system_program: system_program::ID,
         }
         .to_account_metas(None),
@@ -254,6 +346,14 @@ mod tests {
         }
     }
 
+    fn cancel_accounts() -> CancelSignedOrderAccounts {
+        CancelSignedOrderAccounts {
+            trader: pubkey(2),
+            market_config: pubkey(1),
+            payer: pubkey(2),
+        }
+    }
+
     #[test]
     fn builder_places_signed_settlement_tail_after_prefix_instructions() {
         let prefix = system_program::ID;
@@ -316,5 +416,37 @@ mod tests {
         assert_eq!(preset.unit_limit, 100_000);
         assert_eq!(preset.micro_lamports, 0);
         assert!(preset.unit_limit > 79_984);
+    }
+
+    #[test]
+    fn cancel_builder_places_compute_budget_before_cancel_instruction() {
+        let order = signed_order(pubkey(1), pubkey(2), spot_settlement::SignedOrderSide::Bid);
+        let instructions = CancelSignedOrderInstructionBuilder::new()
+            .with_compute_budget_preset(
+                ComputeBudgetPreset::cancel_signed_order().with_priority_fee(2_000),
+            )
+            .build(cancel_accounts(), [9; 32], order);
+
+        assert_eq!(instructions.len(), 3);
+        assert_eq!(
+            instructions[0].program_id,
+            solana_compute_budget_interface::id()
+        );
+        assert_eq!(
+            instructions[1].program_id,
+            solana_compute_budget_interface::id()
+        );
+        assert_eq!(instructions[0].data, vec![2, 64, 156, 0, 0]);
+        assert_eq!(instructions[1].data, vec![3, 208, 7, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(instructions[2].program_id, spot_settlement::id());
+    }
+
+    #[test]
+    fn cancel_signed_order_preset_has_documented_margin() {
+        let preset = ComputeBudgetPreset::cancel_signed_order();
+
+        assert_eq!(preset.unit_limit, 40_000);
+        assert_eq!(preset.micro_lamports, 0);
+        assert!(preset.unit_limit > 31_120);
     }
 }
