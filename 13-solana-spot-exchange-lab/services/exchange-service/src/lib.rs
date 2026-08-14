@@ -300,7 +300,7 @@ async fn ready(
     State(state): State<ServiceState>,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ReadyResponse>, ApiError> {
-    let snapshot = actor_snapshot(&state.actor).await?;
+    let snapshot = actor_snapshot(&state.actor, &request_id).await?;
     info!(
         request_id = %request_id.as_str(),
         market_id = %state.market_id,
@@ -331,7 +331,8 @@ async fn credit_deposit(
     );
     let reply = state
         .actor
-        .credit_deposit(
+        .credit_deposit_with_request_id(
+            Some(request_id.as_str().to_owned()),
             command_id(request.command_id)?,
             trader_id(request.trader_id)?,
             asset_id(request.asset_id)?,
@@ -384,7 +385,11 @@ async fn place_order(
 
     let reply = state
         .actor
-        .place_order(command_id(request.command_id)?, order)
+        .place_order_with_request_id(
+            Some(request_id.as_str().to_owned()),
+            command_id(request.command_id)?,
+            order,
+        )
         .await?;
 
     match reply {
@@ -428,7 +433,7 @@ async fn snapshot(
         return Err(ApiError::NotFound);
     }
 
-    let snapshot = actor_snapshot(&state.actor).await?;
+    let snapshot = actor_snapshot(&state.actor, &request_id).await?;
     info!(
         request_id = %request_id.as_str(),
         market_id = %market_id,
@@ -441,8 +446,14 @@ async fn snapshot(
     }))
 }
 
-async fn actor_snapshot(actor: &MarketActorHandle) -> Result<MarketSnapshot, ApiError> {
-    match actor.snapshot().await? {
+async fn actor_snapshot(
+    actor: &MarketActorHandle,
+    request_id: &RequestId,
+) -> Result<MarketSnapshot, ApiError> {
+    match actor
+        .snapshot_with_request_id(Some(request_id.as_str().to_owned()))
+        .await?
+    {
         MarketReply::Snapshot(snapshot) => Ok(snapshot),
         _ => Err(ApiError::Internal("unexpected snapshot reply")),
     }

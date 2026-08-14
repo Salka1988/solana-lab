@@ -37,6 +37,7 @@ pub enum MarketReply {
 #[derive(Debug)]
 enum MarketCommand {
     CreditDeposit {
+        request_id: Option<String>,
         command_id: CommandId,
         trader_id: TraderId,
         asset_id: AssetId,
@@ -44,14 +45,17 @@ enum MarketCommand {
         reply_to: oneshot::Sender<application::Result<MarketReply>>,
     },
     PlaceOrder {
+        request_id: Option<String>,
         command_id: CommandId,
         order: Order,
         reply_to: oneshot::Sender<application::Result<MarketReply>>,
     },
     Snapshot {
+        request_id: Option<String>,
         reply_to: oneshot::Sender<application::Result<MarketReply>>,
     },
     Shutdown {
+        request_id: Option<String>,
         reply_to: oneshot::Sender<application::Result<MarketReply>>,
     },
 }
@@ -91,8 +95,21 @@ impl MarketActorHandle {
         asset_id: AssetId,
         amount: BalanceAmount,
     ) -> application::Result<MarketReply> {
+        self.credit_deposit_with_request_id(None, command_id, trader_id, asset_id, amount)
+            .await
+    }
+
+    pub async fn credit_deposit_with_request_id(
+        &self,
+        request_id: Option<String>,
+        command_id: CommandId,
+        trader_id: TraderId,
+        asset_id: AssetId,
+        amount: BalanceAmount,
+    ) -> application::Result<MarketReply> {
         let (reply_to, reply_rx) = oneshot::channel();
         let command = MarketCommand::CreditDeposit {
+            request_id,
             command_id,
             trader_id,
             asset_id,
@@ -113,8 +130,19 @@ impl MarketActorHandle {
         command_id: CommandId,
         order: Order,
     ) -> application::Result<MarketReply> {
+        self.place_order_with_request_id(None, command_id, order)
+            .await
+    }
+
+    pub async fn place_order_with_request_id(
+        &self,
+        request_id: Option<String>,
+        command_id: CommandId,
+        order: Order,
+    ) -> application::Result<MarketReply> {
         let (reply_to, reply_rx) = oneshot::channel();
         let command = MarketCommand::PlaceOrder {
+            request_id,
             command_id,
             order,
             reply_to,
@@ -129,9 +157,19 @@ impl MarketActorHandle {
     }
 
     pub async fn snapshot(&self) -> application::Result<MarketReply> {
+        self.snapshot_with_request_id(None).await
+    }
+
+    pub async fn snapshot_with_request_id(
+        &self,
+        request_id: Option<String>,
+    ) -> application::Result<MarketReply> {
         let (reply_to, reply_rx) = oneshot::channel();
         self.sender
-            .send(MarketCommand::Snapshot { reply_to })
+            .send(MarketCommand::Snapshot {
+                request_id,
+                reply_to,
+            })
             .await
             .map_err(|_| application::Error::ActorClosed)?;
         reply_rx
@@ -140,9 +178,19 @@ impl MarketActorHandle {
     }
 
     pub async fn shutdown(&self) -> application::Result<MarketReply> {
+        self.shutdown_with_request_id(None).await
+    }
+
+    pub async fn shutdown_with_request_id(
+        &self,
+        request_id: Option<String>,
+    ) -> application::Result<MarketReply> {
         let (reply_to, reply_rx) = oneshot::channel();
         self.sender
-            .send(MarketCommand::Shutdown { reply_to })
+            .send(MarketCommand::Shutdown {
+                request_id,
+                reply_to,
+            })
             .await
             .map_err(|_| application::Error::ActorClosed)?;
         reply_rx
@@ -173,6 +221,7 @@ async fn handle_command(
 ) -> bool {
     match command {
         MarketCommand::CreditDeposit {
+            request_id,
             command_id,
             trader_id,
             asset_id,
@@ -180,6 +229,7 @@ async fn handle_command(
             reply_to,
         } => {
             info!(
+                request_id = request_id.as_deref().unwrap_or(""),
                 command_id = command_id.get(),
                 trader_id = trader_id.get(),
                 asset_id = asset_id.get(),
@@ -188,15 +238,23 @@ async fn handle_command(
             );
             match app.credit_deposit_event(command_id, trader_id, asset_id, amount) {
                 Ok(event) => {
-                    let (reply, should_shutdown) =
-                        persist_and_apply(app, journal, event, MarketReply::DepositCredited).await;
+                    let (reply, should_shutdown) = persist_and_apply(
+                        app,
+                        journal,
+                        event,
+                        MarketReply::DepositCredited,
+                        request_id.as_deref(),
+                    )
+                    .await;
                     match &reply {
                         Ok(_) => info!(
+                            request_id = request_id.as_deref().unwrap_or(""),
                             command_id = command_id.get(),
                             event_count = app.events().len(),
                             "deposit command accepted"
                         ),
                         Err(error) => warn!(
+                            request_id = request_id.as_deref().unwrap_or(""),
                             command_id = command_id.get(),
                             error = ?error,
                             "deposit command rejected"
@@ -207,6 +265,7 @@ async fn handle_command(
                 }
                 Err(error) => {
                     warn!(
+                        request_id = request_id.as_deref().unwrap_or(""),
                         command_id = command_id.get(),
                         trader_id = trader_id.get(),
                         asset_id = asset_id.get(),
@@ -219,11 +278,13 @@ async fn handle_command(
             }
         }
         MarketCommand::PlaceOrder {
+            request_id,
             command_id,
             order,
             reply_to,
         } => {
             info!(
+                request_id = request_id.as_deref().unwrap_or(""),
                 command_id = command_id.get(),
                 order_id = order.id().get(),
                 trader_id = order.trader_id().get(),
@@ -232,11 +293,17 @@ async fn handle_command(
             match app.place_order_event(command_id, order) {
                 Ok((event, fills)) => {
                     let fill_count = fills.len();
-                    let (reply, should_shutdown) =
-                        persist_and_apply(app, journal, event, MarketReply::OrderPlaced { fills })
-                            .await;
+                    let (reply, should_shutdown) = persist_and_apply(
+                        app,
+                        journal,
+                        event,
+                        MarketReply::OrderPlaced { fills },
+                        request_id.as_deref(),
+                    )
+                    .await;
                     match &reply {
                         Ok(_) => info!(
+                            request_id = request_id.as_deref().unwrap_or(""),
                             command_id = command_id.get(),
                             order_id = order.id().get(),
                             fill_count,
@@ -244,6 +311,7 @@ async fn handle_command(
                             "order command accepted"
                         ),
                         Err(error) => warn!(
+                            request_id = request_id.as_deref().unwrap_or(""),
                             command_id = command_id.get(),
                             order_id = order.id().get(),
                             error = ?error,
@@ -255,6 +323,7 @@ async fn handle_command(
                 }
                 Err(error) => {
                     warn!(
+                        request_id = request_id.as_deref().unwrap_or(""),
                         command_id = command_id.get(),
                         order_id = order.id().get(),
                         trader_id = order.trader_id().get(),
@@ -266,8 +335,12 @@ async fn handle_command(
                 }
             }
         }
-        MarketCommand::Snapshot { reply_to } => {
+        MarketCommand::Snapshot {
+            request_id,
+            reply_to,
+        } => {
             info!(
+                request_id = request_id.as_deref().unwrap_or(""),
                 event_count = app.events().len(),
                 "snapshot command received"
             );
@@ -277,8 +350,12 @@ async fn handle_command(
             let _ = reply_to.send(reply);
             false
         }
-        MarketCommand::Shutdown { reply_to } => {
+        MarketCommand::Shutdown {
+            request_id,
+            reply_to,
+        } => {
             info!(
+                request_id = request_id.as_deref().unwrap_or(""),
                 event_count = app.events().len(),
                 "shutdown command received"
             );
@@ -293,9 +370,11 @@ async fn persist_and_apply(
     journal: &mut impl EventJournal,
     event: application::Event,
     success_reply: MarketReply,
+    request_id: Option<&str>,
 ) -> (application::Result<MarketReply>, bool) {
     if journal.append(&event).await.is_err() {
         error!(
+            request_id = request_id.unwrap_or(""),
             command_id = event.command_id().get(),
             "journal append failed"
         );
@@ -305,7 +384,11 @@ async fn persist_and_apply(
     match app.apply_event(event) {
         Ok(()) => (Ok(success_reply), false),
         Err(error) => {
-            error!(error = ?error, "event apply failed after journal append");
+            error!(
+                request_id = request_id.unwrap_or(""),
+                error = ?error,
+                "event apply failed after journal append"
+            );
             (Err(error), true)
         }
     }
@@ -465,10 +548,12 @@ mod tests {
 
         sender
             .try_send(MarketCommand::Snapshot {
+                request_id: None,
                 reply_to: first_reply,
             })
             .unwrap();
         let result = sender.try_send(MarketCommand::Snapshot {
+            request_id: None,
             reply_to: second_reply,
         });
 
