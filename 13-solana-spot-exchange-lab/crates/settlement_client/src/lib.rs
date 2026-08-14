@@ -190,6 +190,16 @@ pub fn signed_settlement_flow_instructions(
     SignedSettlementInstructionBuilder::new().build_for_market(accounts, args)
 }
 
+pub fn signed_settlement_flow_transaction_instructions(
+    accounts: SignedSettlementFlowAccounts,
+    args: spot_settlement::SignedFillArgs,
+    compute_budget: ComputeBudgetPreset,
+) -> Vec<Instruction> {
+    SignedSettlementInstructionBuilder::new()
+        .with_compute_budget_preset(compute_budget)
+        .build_for_market(accounts, args)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CancelSignedOrderInstructionBuilder {
     prefix_instructions: Vec<Instruction>,
@@ -263,6 +273,17 @@ pub fn cancel_signed_order_flow_instructions(
     order: spot_settlement::SignedOrderPayload,
 ) -> Vec<Instruction> {
     CancelSignedOrderInstructionBuilder::new().build_for_market(accounts, order_hash, order)
+}
+
+pub fn cancel_signed_order_flow_transaction_instructions(
+    accounts: CancelSignedOrderFlowAccounts,
+    order_hash: [u8; 32],
+    order: spot_settlement::SignedOrderPayload,
+    compute_budget: ComputeBudgetPreset,
+) -> Vec<Instruction> {
+    CancelSignedOrderInstructionBuilder::new()
+        .with_compute_budget_preset(compute_budget)
+        .build_for_market(accounts, order_hash, order)
 }
 
 pub fn protocol_config_pda() -> (Pubkey, u8) {
@@ -664,6 +685,62 @@ mod tests {
         assert_eq!(preset.unit_limit, 40_000);
         assert_eq!(preset.micro_lamports, 0);
         assert!(preset.unit_limit > 31_120);
+    }
+
+    #[test]
+    fn signed_settlement_transaction_instructions_are_in_runtime_order() {
+        let instructions = signed_settlement_flow_transaction_instructions(
+            flow_accounts(),
+            signed_fill_args(),
+            ComputeBudgetPreset::signed_settlement().with_priority_fee(2_000),
+        );
+
+        assert_eq!(instructions.len(), 5);
+        assert_eq!(
+            instructions[0].program_id,
+            solana_compute_budget_interface::id()
+        );
+        assert_eq!(
+            instructions[1].program_id,
+            solana_compute_budget_interface::id()
+        );
+        assert_eq!(
+            instructions[2].program_id,
+            solana_sdk_ids::ed25519_program::ID
+        );
+        assert_eq!(
+            instructions[3].program_id,
+            solana_sdk_ids::ed25519_program::ID
+        );
+        assert_eq!(instructions[4].program_id, spot_settlement::id());
+    }
+
+    #[test]
+    fn cancel_transaction_instructions_are_in_runtime_order() {
+        let flow_accounts = cancel_flow_accounts();
+        let market_config = flow_accounts.market_config();
+        let order = signed_order(
+            market_config,
+            flow_accounts.trader,
+            spot_settlement::SignedOrderSide::Bid,
+        );
+        let instructions = cancel_signed_order_flow_transaction_instructions(
+            flow_accounts,
+            [9; 32],
+            order,
+            ComputeBudgetPreset::cancel_signed_order().with_priority_fee(2_000),
+        );
+
+        assert_eq!(instructions.len(), 3);
+        assert_eq!(
+            instructions[0].program_id,
+            solana_compute_budget_interface::id()
+        );
+        assert_eq!(
+            instructions[1].program_id,
+            solana_compute_budget_interface::id()
+        );
+        assert_eq!(instructions[2].program_id, spot_settlement::id());
     }
 
     #[test]
