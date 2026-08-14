@@ -48,6 +48,15 @@ pub enum SubmissionError {
     Uncertain(String),
 }
 
+impl SubmissionError {
+    pub const fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::BlockhashExpired(_) | Self::BlockhashUnavailable(_) | Self::Uncertain(_)
+        )
+    }
+}
+
 #[async_trait]
 pub trait SolanaSubmitter {
     async fn submit(
@@ -59,12 +68,7 @@ pub trait SolanaSubmitter {
 const DEFAULT_MAX_SUBMIT_ATTEMPTS: usize = 3;
 
 fn retryable_submission_error(error: &SubmissionError) -> bool {
-    matches!(
-        error,
-        SubmissionError::BlockhashExpired(_)
-            | SubmissionError::BlockhashUnavailable(_)
-            | SubmissionError::Uncertain(_)
-    )
+    error.is_retryable()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

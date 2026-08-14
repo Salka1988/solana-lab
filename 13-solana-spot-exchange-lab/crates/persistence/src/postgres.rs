@@ -17,6 +17,8 @@ pub struct PostgresEventJournal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettlementOutboxItem {
     pub outbox_id: i64,
+    pub attempts: i32,
+    pub max_attempts: i32,
     pub request: SignedSettlementRequest,
 }
 
@@ -136,7 +138,7 @@ impl PostgresEventJournal {
                 LIMIT $1
                 FOR UPDATE SKIP LOCKED
             )
-            RETURNING outbox_id, request_payload
+            RETURNING outbox_id, attempts, max_attempts, request_payload
             "#,
         )
         .bind(limit.max(1))
@@ -146,14 +148,40 @@ impl PostgresEventJournal {
         rows.into_iter()
             .map(|row| {
                 let outbox_id: i64 = row.try_get("outbox_id")?;
+                let attempts: i32 = row.try_get("attempts")?;
+                let max_attempts: i32 = row.try_get("max_attempts")?;
                 let payload: serde_json::Value = row.try_get("request_payload")?;
                 let payload: SettlementRequestPayload = serde_json::from_value(payload)?;
                 Ok(SettlementOutboxItem {
                     outbox_id,
+                    attempts,
+                    max_attempts,
                     request: payload.into_request()?,
                 })
             })
             .collect()
+    }
+
+    pub async fn keep_settlement_pending(
+        &self,
+        outbox_id: i64,
+        error: &str,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query(
+            r#"
+            UPDATE settlement_outbox
+            SET status = 'pending',
+                last_error = $2,
+                updated_at = now()
+            WHERE outbox_id = $1
+            "#,
+        )
+        .bind(outbox_id)
+        .bind(error)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     pub async fn mark_settlement_submitted(

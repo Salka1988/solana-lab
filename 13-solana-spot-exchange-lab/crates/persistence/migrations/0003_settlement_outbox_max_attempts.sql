@@ -1,0 +1,2 @@
+ALTER TABLE settlement_outbox
+    ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 5;

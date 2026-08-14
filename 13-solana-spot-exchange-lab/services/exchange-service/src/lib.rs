@@ -625,16 +625,23 @@ fn spawn_settlement_worker(
                         }
                     }
                 } else if let Some(failure) = report.failed.first() {
-                    metrics.record_settlement_requests_failed(1);
+                    let retryable =
+                        failure.error.is_retryable() && item.attempts < item.max_attempts;
                     if let Some(outbox) = settlement_outbox.as_ref() {
                         if let Some(outbox_id) = item.outbox_id {
-                            if let Err(error) = outbox
-                                .mark_settlement_failed(outbox_id, &format!("{:?}", failure.error))
-                                .await
-                            {
+                            let error_text = format!("{:?}", failure.error);
+                            let update = if retryable {
+                                outbox.keep_settlement_pending(outbox_id, &error_text).await
+                            } else {
+                                outbox.mark_settlement_failed(outbox_id, &error_text).await
+                            };
+                            if let Err(error) = update {
                                 warn!(error = %error, outbox_id, "settlement outbox update failed");
                             }
                         }
+                    }
+                    if !retryable {
+                        metrics.record_settlement_requests_failed(1);
                     }
                     warn!(error = ?failure.error, "settlement worker reported failed submission");
                 }
@@ -647,6 +654,8 @@ fn spawn_settlement_worker(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SettlementWorkItem {
     outbox_id: Option<i64>,
+    attempts: i32,
+    max_attempts: i32,
     request: relayer::SignedSettlementRequest,
 }
 
@@ -672,6 +681,8 @@ async fn claim_settlement_work(
         .into_iter()
         .map(|request| SettlementWorkItem {
             outbox_id: None,
+            attempts: 1,
+            max_attempts: 1,
             request,
         })
         .collect()
@@ -681,6 +692,8 @@ impl From<SettlementOutboxItem> for SettlementWorkItem {
     fn from(item: SettlementOutboxItem) -> Self {
         Self {
             outbox_id: Some(item.outbox_id),
+            attempts: item.attempts,
+            max_attempts: item.max_attempts,
             request: item.request,
         }
     }
