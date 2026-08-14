@@ -223,7 +223,8 @@ pub fn app_with_actor(
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
-        .route("/metrics", get(metrics_endpoint))
+        .route("/metrics", get(prometheus_metrics_endpoint))
+        .route("/metrics.json", get(metrics_json_endpoint))
         .route("/deposits", post(credit_deposit))
         .route("/orders", post(place_order))
         .route("/markets/{market_id}/snapshot", get(snapshot))
@@ -409,8 +410,16 @@ async fn ready(
     }))
 }
 
-async fn metrics_endpoint(State(state): State<ServiceState>) -> Json<MetricsResponse> {
+async fn metrics_json_endpoint(State(state): State<ServiceState>) -> Json<MetricsResponse> {
     Json(state.metrics.snapshot(state.actor.metrics_snapshot()))
+}
+
+async fn prometheus_metrics_endpoint(State(state): State<ServiceState>) -> impl IntoResponse {
+    let metrics = state.metrics.snapshot(state.actor.metrics_snapshot());
+    (
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        metrics.to_prometheus_text(),
+    )
 }
 
 async fn credit_deposit(
@@ -693,6 +702,94 @@ pub struct MetricsResponse {
     pub actor_apply_after_append_failures_total: u64,
 }
 
+impl MetricsResponse {
+    fn to_prometheus_text(self) -> String {
+        let mut output = String::new();
+        write_counter(
+            &mut output,
+            "exchange_http_requests_total",
+            "Total HTTP requests handled by the exchange service.",
+            self.http_requests_total,
+        );
+        write_counter(
+            &mut output,
+            "exchange_ready_checks_total",
+            "Total readiness checks handled by the exchange service.",
+            self.ready_checks_total,
+        );
+        write_counter(
+            &mut output,
+            "exchange_snapshot_requests_total",
+            "Total market snapshot requests handled by the exchange service.",
+            self.snapshot_requests_total,
+        );
+        write_counter(
+            &mut output,
+            "exchange_deposits_accepted_total",
+            "Total deposit commands accepted by the exchange service.",
+            self.deposits_accepted_total,
+        );
+        write_counter(
+            &mut output,
+            "exchange_orders_accepted_total",
+            "Total order commands accepted by the exchange service.",
+            self.orders_accepted_total,
+        );
+        write_counter(
+            &mut output,
+            "exchange_api_errors_total",
+            "Total API errors returned by the exchange service.",
+            self.api_errors_total,
+        );
+        write_counter(
+            &mut output,
+            "exchange_actor_commands_received_total",
+            "Total commands received by the market actor.",
+            self.actor_commands_received_total,
+        );
+        write_counter(
+            &mut output,
+            "exchange_actor_commands_accepted_total",
+            "Total commands accepted by the market actor.",
+            self.actor_commands_accepted_total,
+        );
+        write_counter(
+            &mut output,
+            "exchange_actor_commands_rejected_total",
+            "Total commands rejected by the market actor.",
+            self.actor_commands_rejected_total,
+        );
+        write_counter(
+            &mut output,
+            "exchange_actor_journal_append_failures_total",
+            "Total actor journal append failures.",
+            self.actor_journal_append_failures_total,
+        );
+        write_counter(
+            &mut output,
+            "exchange_actor_apply_after_append_failures_total",
+            "Total actor apply-after-append failures.",
+            self.actor_apply_after_append_failures_total,
+        );
+        output
+    }
+}
+
+fn write_counter(output: &mut String, name: &str, help: &str, value: u64) {
+    output.push_str("# HELP ");
+    output.push_str(name);
+    output.push(' ');
+    output.push_str(help);
+    output.push('\n');
+    output.push_str("# TYPE ");
+    output.push_str(name);
+    output.push_str(" counter\n");
+    output.push_str(name);
+    output.push(' ');
+    output.push_str(&value.to_string());
+    output.push('\n');
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiError {
     BadRequest(String),
@@ -761,6 +858,11 @@ mod tests {
     async fn response_json(response: axum::response::Response) -> Value {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn response_text(response: axum::response::Response) -> String {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
     }
 
     #[tokio::test]
@@ -956,7 +1058,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/metrics")
+                    .uri("/metrics.json")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1016,7 +1118,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/metrics")
+                    .uri("/metrics.json")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1040,6 +1142,56 @@ mod tests {
                 "actor_apply_after_append_failures_total": 0
             })
         );
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_prometheus_text() {
+        let service = app();
+
+        let deposit = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/deposits")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "command_id": 1,
+                            "trader_id": 1,
+                            "asset_id": 1,
+                            "amount": 7
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deposit.status(), StatusCode::OK);
+
+        let metrics = service
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(metrics.status(), StatusCode::OK);
+        assert_eq!(
+            metrics.headers().get("content-type").unwrap(),
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
+        let body = response_text(metrics).await;
+        assert!(body.contains("# TYPE exchange_http_requests_total counter\n"));
+        assert!(body.contains("exchange_http_requests_total 2\n"));
+        assert!(body.contains("exchange_deposits_accepted_total 1\n"));
+        assert!(body.contains("exchange_actor_commands_received_total 1\n"));
+        assert!(body.contains("exchange_actor_commands_accepted_total 1\n"));
     }
 
     #[tokio::test]
