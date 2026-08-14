@@ -8,6 +8,37 @@ use anchor_lang::{
 use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_ed25519_program::new_ed25519_instruction_with_signature;
 
+pub const TRUSTED_SETTLEMENT_COMPUTE_UNIT_LIMIT: u32 = 25_000;
+pub const SIGNED_SETTLEMENT_COMPUTE_UNIT_LIMIT: u32 = 100_000;
+pub const DEFAULT_PRIORITY_FEE_MICRO_LAMPORTS: u64 = 0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComputeBudgetPreset {
+    pub unit_limit: u32,
+    pub micro_lamports: u64,
+}
+
+impl ComputeBudgetPreset {
+    pub const fn trusted_settlement() -> Self {
+        Self {
+            unit_limit: TRUSTED_SETTLEMENT_COMPUTE_UNIT_LIMIT,
+            micro_lamports: DEFAULT_PRIORITY_FEE_MICRO_LAMPORTS,
+        }
+    }
+
+    pub const fn signed_settlement() -> Self {
+        Self {
+            unit_limit: SIGNED_SETTLEMENT_COMPUTE_UNIT_LIMIT,
+            micro_lamports: DEFAULT_PRIORITY_FEE_MICRO_LAMPORTS,
+        }
+    }
+
+    pub const fn with_priority_fee(mut self, micro_lamports: u64) -> Self {
+        self.micro_lamports = micro_lamports;
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignedSettlementAccounts {
     pub settlement_authority: Pubkey,
@@ -47,6 +78,14 @@ impl SignedSettlementInstructionBuilder {
     pub fn with_compute_budget(self, units: u32, micro_lamports: u64) -> Self {
         self.with_compute_unit_limit(units)
             .with_compute_unit_price(micro_lamports)
+    }
+
+    pub fn with_compute_budget_preset(self, preset: ComputeBudgetPreset) -> Self {
+        self.with_compute_budget(preset.unit_limit, preset.micro_lamports)
+    }
+
+    pub fn with_signed_settlement_compute_budget(self) -> Self {
+        self.with_compute_budget_preset(ComputeBudgetPreset::signed_settlement())
     }
 
     pub fn build(
@@ -243,7 +282,9 @@ mod tests {
     #[test]
     fn builder_places_compute_budget_before_signed_settlement_tail() {
         let instructions = SignedSettlementInstructionBuilder::new()
-            .with_compute_budget(90_000, 2_000)
+            .with_compute_budget_preset(
+                ComputeBudgetPreset::signed_settlement().with_priority_fee(2_000),
+            )
             .build(accounts(), signed_fill_args());
 
         assert_eq!(instructions.len(), 5);
@@ -255,7 +296,7 @@ mod tests {
             instructions[1].program_id,
             solana_compute_budget_interface::id()
         );
-        assert_eq!(instructions[0].data, vec![2, 144, 95, 1, 0]);
+        assert_eq!(instructions[0].data, vec![2, 160, 134, 1, 0]);
         assert_eq!(instructions[1].data, vec![3, 208, 7, 0, 0, 0, 0, 0, 0]);
         assert_eq!(
             instructions[2].program_id,
@@ -266,5 +307,14 @@ mod tests {
             solana_sdk_ids::ed25519_program::ID
         );
         assert_eq!(instructions[4].program_id, spot_settlement::id());
+    }
+
+    #[test]
+    fn signed_settlement_preset_has_documented_margin() {
+        let preset = ComputeBudgetPreset::signed_settlement();
+
+        assert_eq!(preset.unit_limit, 100_000);
+        assert_eq!(preset.micro_lamports, 0);
+        assert!(preset.unit_limit > 79_984);
     }
 }

@@ -846,7 +846,7 @@ fn signed_settlement_builder_allows_compute_budget_before_signatures() {
         SIGNED_FILL_QUANTITY,
     );
     let instructions = signed_fill_builder(&fixture)
-        .with_compute_budget(90_000, 2_000)
+        .with_signed_settlement_compute_budget()
         .build(signed_settlement_accounts(&fixture), args);
 
     assert!(test_support::send_transaction(
