@@ -10,6 +10,8 @@ use settlement_client::{
 use solana_hash::Hash;
 use solana_keypair::Keypair;
 use solana_message::{Message, VersionedMessage};
+#[cfg(feature = "rpc")]
+use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 
@@ -152,6 +154,72 @@ impl TransactionSigner for InMemoryTransactionSigner {
 
         VersionedTransaction::try_new(VersionedMessage::Legacy(message), &signers)
             .map_err(|error| SubmissionError::BuildTransaction(error.to_string()))
+    }
+}
+
+#[cfg(feature = "rpc")]
+pub struct RpcBlockhashProvider {
+    client: RpcClient,
+}
+
+#[cfg(feature = "rpc")]
+impl RpcBlockhashProvider {
+    pub fn new(url: String) -> Self {
+        Self {
+            client: RpcClient::new(url),
+        }
+    }
+
+    pub const fn from_client(client: RpcClient) -> Self {
+        Self { client }
+    }
+}
+
+#[cfg(feature = "rpc")]
+#[async_trait]
+impl BlockhashProvider for RpcBlockhashProvider {
+    async fn latest_blockhash(&mut self) -> Result<Hash, SubmissionError> {
+        self.client
+            .get_latest_blockhash()
+            .await
+            .map_err(|error| SubmissionError::BlockhashUnavailable(error.to_string()))
+    }
+}
+
+#[cfg(feature = "rpc")]
+pub struct RpcTransactionSender {
+    client: RpcClient,
+}
+
+#[cfg(feature = "rpc")]
+impl RpcTransactionSender {
+    pub fn new(url: String) -> Self {
+        Self {
+            client: RpcClient::new(url),
+        }
+    }
+
+    pub const fn from_client(client: RpcClient) -> Self {
+        Self { client }
+    }
+}
+
+#[cfg(feature = "rpc")]
+#[async_trait]
+impl TransactionSender for RpcTransactionSender {
+    async fn send(
+        &mut self,
+        transaction: VersionedTransaction,
+    ) -> Result<SubmittedTransaction, SubmissionError> {
+        let signature = self
+            .client
+            .send_transaction(&transaction)
+            .await
+            .map_err(|error| SubmissionError::Rejected(error.to_string()))?;
+
+        Ok(SubmittedTransaction {
+            signature: *signature.as_array(),
+        })
     }
 }
 
@@ -324,6 +392,11 @@ mod tests {
 
     fn blockhash(byte: u8) -> Hash {
         Hash::new_from_array([byte; 32])
+    }
+
+    #[cfg(feature = "rpc")]
+    fn rpc_url() -> String {
+        std::env::var("SOLANA_RPC_URL").unwrap_or_else(|_| "http://127.0.0.1:8899".to_string())
     }
 
     fn signed_order(
@@ -668,5 +741,25 @@ mod tests {
             SubmissionError::Rejected("transaction rejected".to_string())
         );
         assert_eq!(submitter.transaction_sender.sent_count, 1);
+    }
+
+    #[cfg(feature = "rpc")]
+    #[test]
+    fn rpc_adapters_can_be_constructed() {
+        let url = rpc_url();
+
+        let _blockhash_provider = RpcBlockhashProvider::new(url.clone());
+        let _transaction_sender = RpcTransactionSender::new(url);
+    }
+
+    #[cfg(feature = "rpc")]
+    #[tokio::test]
+    #[ignore = "requires SOLANA_RPC_URL or local validator at http://127.0.0.1:8899"]
+    async fn rpc_blockhash_provider_fetches_live_blockhash() {
+        let mut blockhash_provider = RpcBlockhashProvider::new(rpc_url());
+
+        let blockhash = blockhash_provider.latest_blockhash().await.unwrap();
+
+        assert_ne!(blockhash, Hash::default());
     }
 }
