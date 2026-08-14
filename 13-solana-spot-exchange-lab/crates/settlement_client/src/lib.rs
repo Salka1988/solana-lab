@@ -181,6 +181,67 @@ pub fn cancel_signed_order_instructions(
     CancelSignedOrderInstructionBuilder::new().build(accounts, order_hash, order)
 }
 
+pub fn protocol_config_pda() -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[spot_settlement::PROTOCOL_CONFIG_SEED],
+        &spot_settlement::id(),
+    )
+}
+
+pub fn market_config_pda(base_mint: Pubkey, quote_mint: Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[
+            spot_settlement::MARKET_CONFIG_SEED,
+            base_mint.as_ref(),
+            quote_mint.as_ref(),
+        ],
+        &spot_settlement::id(),
+    )
+}
+
+pub fn trader_market_balance_pda(market_config: Pubkey, trader: Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[
+            spot_settlement::TRADER_MARKET_BALANCE_SEED,
+            market_config.as_ref(),
+            trader.as_ref(),
+        ],
+        &spot_settlement::id(),
+    )
+}
+
+pub fn vault_authority_pda(market_config: Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[
+            spot_settlement::VAULT_AUTHORITY_SEED,
+            market_config.as_ref(),
+        ],
+        &spot_settlement::id(),
+    )
+}
+
+pub fn settlement_receipt_pda(market_config: Pubkey, settlement_id: u64) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[
+            spot_settlement::SETTLEMENT_RECEIPT_SEED,
+            market_config.as_ref(),
+            &settlement_id.to_le_bytes(),
+        ],
+        &spot_settlement::id(),
+    )
+}
+
+pub fn order_fill_state_pda(market_config: Pubkey, order_hash: [u8; 32]) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[
+            spot_settlement::ORDER_FILL_STATE_SEED,
+            market_config.as_ref(),
+            order_hash.as_ref(),
+        ],
+        &spot_settlement::id(),
+    )
+}
+
 fn buyer_signature_instruction(
     buyer: Pubkey,
     args: spot_settlement::SignedFillArgs,
@@ -226,12 +287,15 @@ fn settle_signed_fill_instruction(
             buyer_order_fill_state: order_fill_state_pda(
                 accounts.market_config,
                 args.buyer_order_hash,
-            ),
+            )
+            .0,
             seller_order_fill_state: order_fill_state_pda(
                 accounts.market_config,
                 args.seller_order_hash,
-            ),
-            settlement_receipt: settlement_receipt_pda(accounts.market_config, args.settlement_id),
+            )
+            .0,
+            settlement_receipt: settlement_receipt_pda(accounts.market_config, args.settlement_id)
+                .0,
             payer: accounts.payer,
             instructions_sysvar: solana_sdk_ids::sysvar::instructions::ID,
             system_program: system_program::ID,
@@ -251,36 +315,12 @@ fn cancel_signed_order_instruction(
         spot_settlement::accounts::CancelSignedOrder {
             trader: accounts.trader,
             market_config: accounts.market_config,
-            order_fill_state: order_fill_state_pda(accounts.market_config, order_hash),
+            order_fill_state: order_fill_state_pda(accounts.market_config, order_hash).0,
             payer: accounts.payer,
             system_program: system_program::ID,
         }
         .to_account_metas(None),
     )
-}
-
-fn settlement_receipt_pda(market_config: Pubkey, settlement_id: u64) -> Pubkey {
-    Pubkey::find_program_address(
-        &[
-            spot_settlement::SETTLEMENT_RECEIPT_SEED,
-            market_config.as_ref(),
-            &settlement_id.to_le_bytes(),
-        ],
-        &spot_settlement::id(),
-    )
-    .0
-}
-
-fn order_fill_state_pda(market_config: Pubkey, order_hash: [u8; 32]) -> Pubkey {
-    Pubkey::find_program_address(
-        &[
-            spot_settlement::ORDER_FILL_STATE_SEED,
-            market_config.as_ref(),
-            order_hash.as_ref(),
-        ],
-        &spot_settlement::id(),
-    )
-    .0
 }
 
 #[cfg(test)]
@@ -448,5 +488,77 @@ mod tests {
         assert_eq!(preset.unit_limit, 40_000);
         assert_eq!(preset.micro_lamports, 0);
         assert!(preset.unit_limit > 31_120);
+    }
+
+    #[test]
+    fn pda_helpers_match_program_seed_contracts() {
+        let base_mint = pubkey(11);
+        let quote_mint = pubkey(12);
+        let trader = pubkey(13);
+        let order_hash = [14; 32];
+        let settlement_id = 15;
+        let (market_config, market_bump) = market_config_pda(base_mint, quote_mint);
+
+        assert_eq!(
+            protocol_config_pda(),
+            Pubkey::find_program_address(
+                &[spot_settlement::PROTOCOL_CONFIG_SEED],
+                &spot_settlement::id()
+            )
+        );
+        assert_eq!(
+            (market_config, market_bump),
+            Pubkey::find_program_address(
+                &[
+                    spot_settlement::MARKET_CONFIG_SEED,
+                    base_mint.as_ref(),
+                    quote_mint.as_ref(),
+                ],
+                &spot_settlement::id()
+            )
+        );
+        assert_eq!(
+            trader_market_balance_pda(market_config, trader),
+            Pubkey::find_program_address(
+                &[
+                    spot_settlement::TRADER_MARKET_BALANCE_SEED,
+                    market_config.as_ref(),
+                    trader.as_ref(),
+                ],
+                &spot_settlement::id()
+            )
+        );
+        assert_eq!(
+            vault_authority_pda(market_config),
+            Pubkey::find_program_address(
+                &[
+                    spot_settlement::VAULT_AUTHORITY_SEED,
+                    market_config.as_ref(),
+                ],
+                &spot_settlement::id()
+            )
+        );
+        assert_eq!(
+            settlement_receipt_pda(market_config, settlement_id),
+            Pubkey::find_program_address(
+                &[
+                    spot_settlement::SETTLEMENT_RECEIPT_SEED,
+                    market_config.as_ref(),
+                    &settlement_id.to_le_bytes(),
+                ],
+                &spot_settlement::id()
+            )
+        );
+        assert_eq!(
+            order_fill_state_pda(market_config, order_hash),
+            Pubkey::find_program_address(
+                &[
+                    spot_settlement::ORDER_FILL_STATE_SEED,
+                    market_config.as_ref(),
+                    order_hash.as_ref(),
+                ],
+                &spot_settlement::id()
+            )
+        );
     }
 }

@@ -30,70 +30,27 @@ fn setup() -> (LiteSVM, Keypair) {
 }
 
 fn protocol_config_pda() -> Pubkey {
-    Pubkey::find_program_address(
-        &[spot_settlement::PROTOCOL_CONFIG_SEED],
-        &spot_settlement::id(),
-    )
-    .0
+    settlement_client::protocol_config_pda().0
 }
 
 fn market_config_pda(base_mint: Pubkey, quote_mint: Pubkey) -> Pubkey {
-    Pubkey::find_program_address(
-        &[
-            spot_settlement::MARKET_CONFIG_SEED,
-            base_mint.as_ref(),
-            quote_mint.as_ref(),
-        ],
-        &spot_settlement::id(),
-    )
-    .0
+    settlement_client::market_config_pda(base_mint, quote_mint).0
 }
 
 fn trader_balance_pda(market_config: Pubkey, trader: Pubkey) -> Pubkey {
-    Pubkey::find_program_address(
-        &[
-            spot_settlement::TRADER_MARKET_BALANCE_SEED,
-            market_config.as_ref(),
-            trader.as_ref(),
-        ],
-        &spot_settlement::id(),
-    )
-    .0
+    settlement_client::trader_market_balance_pda(market_config, trader).0
 }
 
 fn vault_authority_pda(market_config: Pubkey) -> Pubkey {
-    Pubkey::find_program_address(
-        &[
-            spot_settlement::VAULT_AUTHORITY_SEED,
-            market_config.as_ref(),
-        ],
-        &spot_settlement::id(),
-    )
-    .0
+    settlement_client::vault_authority_pda(market_config).0
 }
 
 fn settlement_receipt_pda(market_config: Pubkey, settlement_id: u64) -> Pubkey {
-    Pubkey::find_program_address(
-        &[
-            spot_settlement::SETTLEMENT_RECEIPT_SEED,
-            market_config.as_ref(),
-            &settlement_id.to_le_bytes(),
-        ],
-        &spot_settlement::id(),
-    )
-    .0
+    settlement_client::settlement_receipt_pda(market_config, settlement_id).0
 }
 
 fn order_fill_state_pda(market_config: Pubkey, order_hash: [u8; 32]) -> Pubkey {
-    Pubkey::find_program_address(
-        &[
-            spot_settlement::ORDER_FILL_STATE_SEED,
-            market_config.as_ref(),
-            order_hash.as_ref(),
-        ],
-        &spot_settlement::id(),
-    )
-    .0
+    settlement_client::order_fill_state_pda(market_config, order_hash).0
 }
 
 fn initialize_protocol_ix(admin: Pubkey, protocol_config: Pubkey) -> Instruction {
