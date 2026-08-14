@@ -566,6 +566,62 @@ pub struct SignedSettlementRequest {
     pub args: spot_settlement::SignedFillArgs,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementWorkerReport {
+    pub submitted: Vec<SubmittedTransaction>,
+    pub failed: Vec<SettlementSubmissionFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementSubmissionFailure {
+    pub request: SignedSettlementRequest,
+    pub error: SubmissionError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementRequestWorker<S> {
+    planner: SettlementInstructionPlanner,
+    submitter: S,
+}
+
+impl<S> SettlementRequestWorker<S> {
+    pub fn new(submitter: S) -> Self {
+        Self {
+            planner: SettlementInstructionPlanner::default(),
+            submitter,
+        }
+    }
+
+    pub const fn with_planner(planner: SettlementInstructionPlanner, submitter: S) -> Self {
+        Self { planner, submitter }
+    }
+
+    pub async fn submit_requests(
+        &mut self,
+        requests: impl IntoIterator<Item = SignedSettlementRequest>,
+    ) -> SettlementWorkerReport
+    where
+        S: SolanaSubmitter + Send,
+    {
+        let mut submitted = Vec::new();
+        let mut failed = Vec::new();
+
+        for request in requests {
+            let plan = self.planner.plan_signed_settlement(request);
+            match self.submitter.submit(plan).await {
+                Ok(transaction) => submitted.push(transaction),
+                Err(error) => failed.push(SettlementSubmissionFailure { request, error }),
+            }
+        }
+
+        SettlementWorkerReport { submitted, failed }
+    }
+
+    pub const fn submitter(&self) -> &S {
+        &self.submitter
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CancelSignedOrderRequest {
     pub trader: Pubkey,
@@ -900,6 +956,91 @@ mod tests {
 
         assert_eq!(submitted.signature, [42; 64]);
         assert_eq!(submitter.submitted_plans, vec![plan]);
+    }
+
+    #[tokio::test]
+    async fn settlement_worker_submits_signed_settlement_requests() {
+        let base_mint = pubkey(11);
+        let quote_mint = pubkey(12);
+        let market_config = settlement_client::market_config_pda(base_mint, quote_mint).0;
+        let mut worker = SettlementRequestWorker::new(RecordingSubmitter::new([42; 64]));
+
+        let report = worker
+            .submit_requests([
+                SignedSettlementRequest {
+                    settlement_authority: pubkey(8),
+                    base_mint,
+                    quote_mint,
+                    buyer: pubkey(2),
+                    seller: pubkey(3),
+                    payer: pubkey(9),
+                    args: signed_fill_args(market_config),
+                },
+                SignedSettlementRequest {
+                    settlement_authority: pubkey(8),
+                    base_mint,
+                    quote_mint,
+                    buyer: pubkey(2),
+                    seller: pubkey(3),
+                    payer: pubkey(9),
+                    args: signed_fill_args(market_config),
+                },
+            ])
+            .await;
+
+        assert_eq!(
+            report,
+            SettlementWorkerReport {
+                submitted: vec![
+                    SubmittedTransaction {
+                        signature: [42; 64]
+                    },
+                    SubmittedTransaction {
+                        signature: [42; 64]
+                    }
+                ],
+                failed: Vec::new(),
+            }
+        );
+        assert_eq!(worker.submitter().submitted_plans.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn settlement_worker_reports_failures_and_continues() {
+        let base_mint = pubkey(11);
+        let quote_mint = pubkey(12);
+        let market_config = settlement_client::market_config_pda(base_mint, quote_mint).0;
+        let request = SignedSettlementRequest {
+            settlement_authority: pubkey(8),
+            base_mint,
+            quote_mint,
+            buyer: pubkey(2),
+            seller: pubkey(3),
+            payer: pubkey(9),
+            args: signed_fill_args(market_config),
+        };
+        let mut worker = SettlementRequestWorker::new(SequenceSubmitter::new(vec![
+            Err(SubmissionError::Rejected("first failed".to_string())),
+            Ok(SubmittedTransaction {
+                signature: [42; 64],
+            }),
+        ]));
+
+        let report = worker.submit_requests([request, request]).await;
+
+        assert_eq!(
+            report,
+            SettlementWorkerReport {
+                submitted: vec![SubmittedTransaction {
+                    signature: [42; 64]
+                }],
+                failed: vec![SettlementSubmissionFailure {
+                    request,
+                    error: SubmissionError::Rejected("first failed".to_string()),
+                }],
+            }
+        );
+        assert_eq!(worker.submitter().submitted_plans.len(), 2);
     }
 
     #[tokio::test]

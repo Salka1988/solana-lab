@@ -143,6 +143,16 @@ impl SettlementEdgeState {
             .expect("settlement request queue poisoned")
             .len()
     }
+
+    pub fn drain_queued_settlement_requests(&self) -> Vec<relayer::SignedSettlementRequest> {
+        std::mem::take(
+            &mut self
+                .inner
+                .queued_requests
+                .lock()
+                .expect("settlement request queue poisoned"),
+        )
+    }
 }
 
 impl relayer::SettlementSignedOrderSource for SettlementEdgeState {
@@ -1501,6 +1511,31 @@ mod tests {
         assert_eq!(settlement.allocate_settlement_ids(0).unwrap(), None);
         assert_eq!(settlement.allocate_settlement_ids(2).unwrap(), Some(0));
         assert_eq!(settlement.allocate_settlement_ids(3).unwrap(), Some(2));
+
+        let request = relayer::SignedSettlementRequest {
+            settlement_authority: Pubkey::new_from_array([8; 32]),
+            base_mint: Pubkey::new_from_array([9; 32]),
+            quote_mint: Pubkey::new_from_array([10; 32]),
+            buyer: Pubkey::new_from_array([11; 32]),
+            seller: Pubkey::new_from_array([12; 32]),
+            payer: Pubkey::new_from_array([13; 32]),
+            args: spot_settlement::SignedFillArgs {
+                settlement_id: 1,
+                fill_price: 100,
+                fill_quantity: 7,
+                buyer_order_hash: [1; 32],
+                seller_order_hash: [2; 32],
+                buyer_order: signed_order.order,
+                buyer_signature: [1; 64],
+                seller_order: signed_order.order,
+                seller_signature: [2; 64],
+            },
+        };
+
+        settlement.queue_settlement_requests(vec![request]);
+        assert_eq!(settlement.queued_settlement_count(), 1);
+        assert_eq!(settlement.drain_queued_settlement_requests(), vec![request]);
+        assert_eq!(settlement.queued_settlement_count(), 0);
     }
 
     #[tokio::test]
