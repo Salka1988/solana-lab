@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod event;
+pub mod settlement;
 
 use std::collections::BTreeSet;
 
@@ -12,6 +13,7 @@ use domain::{
 
 pub use error::Error;
 pub use event::{CommandId, Event};
+pub use settlement::{SettlementBatch, SettlementIntent, SettlementPort};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
