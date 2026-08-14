@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anchor-lang.workspace = true
+async-trait.workspace = true
 settlement_client.workspace = true
 solana-hash.workspace = true
 solana-keypair.workspace = true
@@ -17,6 +18,7 @@ spot_settlement = { path = "../../programs/spot-settlement", features = ["no-ent
 [dev-dependencies]
 solana-compute-budget-interface.workspace = true
 solana-sdk-ids.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

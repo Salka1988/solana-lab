@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use anchor_lang::{prelude::Pubkey, solana_program::instruction::Instruction};
+use async_trait::async_trait;
 use settlement_client::{
     cancel_signed_order_flow_transaction_instructions,
     signed_settlement_flow_transaction_instructions, CancelSignedOrderFlowAccounts,
@@ -34,8 +35,12 @@ pub enum SubmissionError {
     Rejected(String),
 }
 
+#[async_trait]
 pub trait SolanaSubmitter {
-    fn submit(&mut self, plan: InstructionPlan) -> Result<SubmittedTransaction, SubmissionError>;
+    async fn submit(
+        &mut self,
+        plan: InstructionPlan,
+    ) -> Result<SubmittedTransaction, SubmissionError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,8 +58,12 @@ impl RecordingSubmitter {
     }
 }
 
+#[async_trait]
 impl SolanaSubmitter for RecordingSubmitter {
-    fn submit(&mut self, plan: InstructionPlan) -> Result<SubmittedTransaction, SubmissionError> {
+    async fn submit(
+        &mut self,
+        plan: InstructionPlan,
+    ) -> Result<SubmittedTransaction, SubmissionError> {
         self.submitted_plans.push(plan);
         Ok(SubmittedTransaction {
             signature: self.signature,
@@ -62,8 +71,9 @@ impl SolanaSubmitter for RecordingSubmitter {
     }
 }
 
+#[async_trait]
 pub trait BlockhashProvider {
-    fn latest_blockhash(&mut self) -> Result<Hash, SubmissionError>;
+    async fn latest_blockhash(&mut self) -> Result<Hash, SubmissionError>;
 }
 
 pub trait TransactionSigner {
@@ -74,8 +84,9 @@ pub trait TransactionSigner {
     ) -> Result<VersionedTransaction, SubmissionError>;
 }
 
+#[async_trait]
 pub trait TransactionSender {
-    fn send(
+    async fn send(
         &mut self,
         transaction: VersionedTransaction,
     ) -> Result<SubmittedTransaction, SubmissionError>;
@@ -98,16 +109,20 @@ impl<B, S, T> RpcSubmitter<B, S, T> {
     }
 }
 
+#[async_trait]
 impl<B, S, T> SolanaSubmitter for RpcSubmitter<B, S, T>
 where
-    B: BlockhashProvider,
-    S: TransactionSigner,
-    T: TransactionSender,
+    B: BlockhashProvider + Send,
+    S: TransactionSigner + Send + Sync,
+    T: TransactionSender + Send,
 {
-    fn submit(&mut self, plan: InstructionPlan) -> Result<SubmittedTransaction, SubmissionError> {
-        let blockhash = self.blockhash_provider.latest_blockhash()?;
+    async fn submit(
+        &mut self,
+        plan: InstructionPlan,
+    ) -> Result<SubmittedTransaction, SubmissionError> {
+        let blockhash = self.blockhash_provider.latest_blockhash().await?;
         let transaction = self.transaction_signer.sign(&plan, blockhash)?;
-        self.transaction_sender.send(transaction)
+        self.transaction_sender.send(transaction).await
     }
 }
 
@@ -265,8 +280,9 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct FixedBlockhashProvider(Result<Hash, SubmissionError>);
 
+    #[async_trait]
     impl BlockhashProvider for FixedBlockhashProvider {
-        fn latest_blockhash(&mut self) -> Result<Hash, SubmissionError> {
+        async fn latest_blockhash(&mut self) -> Result<Hash, SubmissionError> {
             self.0.clone()
         }
     }
@@ -286,8 +302,9 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl TransactionSender for RecordingTransactionSender {
-        fn send(
+        async fn send(
             &mut self,
             transaction: VersionedTransaction,
         ) -> Result<SubmittedTransaction, SubmissionError> {
@@ -425,8 +442,8 @@ mod tests {
         assert_eq!(plan.instructions[2].program_id, spot_settlement::id());
     }
 
-    #[test]
-    fn submitter_accepts_signed_settlement_plan() {
+    #[tokio::test]
+    async fn submitter_accepts_signed_settlement_plan() {
         let base_mint = pubkey(11);
         let quote_mint = pubkey(12);
         let market_config = settlement_client::market_config_pda(base_mint, quote_mint).0;
@@ -443,14 +460,14 @@ mod tests {
         );
         let mut submitter = RecordingSubmitter::new([42; 64]);
 
-        let submitted = submitter.submit(plan.clone()).unwrap();
+        let submitted = submitter.submit(plan.clone()).await.unwrap();
 
         assert_eq!(submitted.signature, [42; 64]);
         assert_eq!(submitter.submitted_plans, vec![plan]);
     }
 
-    #[test]
-    fn submitter_accepts_cancel_plan() {
+    #[tokio::test]
+    async fn submitter_accepts_cancel_plan() {
         let base_mint = pubkey(11);
         let quote_mint = pubkey(12);
         let market_config = settlement_client::market_config_pda(base_mint, quote_mint).0;
@@ -470,14 +487,14 @@ mod tests {
         );
         let mut submitter = RecordingSubmitter::new([43; 64]);
 
-        let submitted = submitter.submit(plan.clone()).unwrap();
+        let submitted = submitter.submit(plan.clone()).await.unwrap();
 
         assert_eq!(submitted.signature, [43; 64]);
         assert_eq!(submitter.submitted_plans, vec![plan]);
     }
 
-    #[test]
-    fn rpc_submitter_builds_signs_and_sends_signed_settlement_plan() {
+    #[tokio::test]
+    async fn rpc_submitter_builds_signs_and_sends_signed_settlement_plan() {
         let settlement_authority = keypair(8);
         let payer = keypair(9);
         let base_mint = pubkey(11);
@@ -502,14 +519,14 @@ mod tests {
             })),
         );
 
-        let submitted = submitter.submit(plan).unwrap();
+        let submitted = submitter.submit(plan).await.unwrap();
 
         assert_eq!(submitted.signature, [44; 64]);
         assert_eq!(submitter.transaction_sender.sent_count, 1);
     }
 
-    #[test]
-    fn rpc_submitter_builds_signs_and_sends_cancel_plan() {
+    #[tokio::test]
+    async fn rpc_submitter_builds_signs_and_sends_cancel_plan() {
         let trader = keypair(2);
         let base_mint = pubkey(11);
         let quote_mint = pubkey(12);
@@ -536,14 +553,14 @@ mod tests {
             })),
         );
 
-        let submitted = submitter.submit(plan).unwrap();
+        let submitted = submitter.submit(plan).await.unwrap();
 
         assert_eq!(submitted.signature, [45; 64]);
         assert_eq!(submitter.transaction_sender.sent_count, 1);
     }
 
-    #[test]
-    fn rpc_submitter_rejects_missing_required_signer() {
+    #[tokio::test]
+    async fn rpc_submitter_rejects_missing_required_signer() {
         let settlement_authority = keypair(8);
         let payer = keypair(9);
         let base_mint = pubkey(11);
@@ -568,7 +585,7 @@ mod tests {
             })),
         );
 
-        let error = submitter.submit(plan).unwrap_err();
+        let error = submitter.submit(plan).await.unwrap_err();
 
         assert_eq!(
             error,
@@ -577,8 +594,8 @@ mod tests {
         assert_eq!(submitter.transaction_sender.sent_count, 0);
     }
 
-    #[test]
-    fn rpc_submitter_propagates_blockhash_failure() {
+    #[tokio::test]
+    async fn rpc_submitter_propagates_blockhash_failure() {
         let trader = keypair(2);
         let base_mint = pubkey(11);
         let quote_mint = pubkey(12);
@@ -607,7 +624,7 @@ mod tests {
             })),
         );
 
-        let error = submitter.submit(plan).unwrap_err();
+        let error = submitter.submit(plan).await.unwrap_err();
 
         assert_eq!(
             error,
@@ -616,8 +633,8 @@ mod tests {
         assert_eq!(submitter.transaction_sender.sent_count, 0);
     }
 
-    #[test]
-    fn rpc_submitter_propagates_sender_failure() {
+    #[tokio::test]
+    async fn rpc_submitter_propagates_sender_failure() {
         let trader = keypair(2);
         let base_mint = pubkey(11);
         let quote_mint = pubkey(12);
@@ -644,7 +661,7 @@ mod tests {
             ))),
         );
 
-        let error = submitter.submit(plan).unwrap_err();
+        let error = submitter.submit(plan).await.unwrap_err();
 
         assert_eq!(
             error,
