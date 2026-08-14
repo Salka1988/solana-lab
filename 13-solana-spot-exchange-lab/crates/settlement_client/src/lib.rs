@@ -5,6 +5,7 @@ use anchor_lang::{
     solana_program::{instruction::Instruction, system_program},
     InstructionData, ToAccountMetas,
 };
+use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_ed25519_program::new_ed25519_instruction_with_signature;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,21 @@ impl SignedSettlementInstructionBuilder {
     pub fn with_prefix_instruction(mut self, instruction: Instruction) -> Self {
         self.prefix_instructions.push(instruction);
         self
+    }
+
+    pub fn with_compute_unit_limit(self, units: u32) -> Self {
+        self.with_prefix_instruction(ComputeBudgetInstruction::set_compute_unit_limit(units))
+    }
+
+    pub fn with_compute_unit_price(self, micro_lamports: u64) -> Self {
+        self.with_prefix_instruction(ComputeBudgetInstruction::set_compute_unit_price(
+            micro_lamports,
+        ))
+    }
+
+    pub fn with_compute_budget(self, units: u32, micro_lamports: u64) -> Self {
+        self.with_compute_unit_limit(units)
+            .with_compute_unit_price(micro_lamports)
     }
 
     pub fn build(
@@ -222,5 +238,33 @@ mod tests {
             solana_sdk_ids::ed25519_program::ID
         );
         assert_eq!(instructions[3].program_id, spot_settlement::id());
+    }
+
+    #[test]
+    fn builder_places_compute_budget_before_signed_settlement_tail() {
+        let instructions = SignedSettlementInstructionBuilder::new()
+            .with_compute_budget(90_000, 2_000)
+            .build(accounts(), signed_fill_args());
+
+        assert_eq!(instructions.len(), 5);
+        assert_eq!(
+            instructions[0].program_id,
+            solana_compute_budget_interface::id()
+        );
+        assert_eq!(
+            instructions[1].program_id,
+            solana_compute_budget_interface::id()
+        );
+        assert_eq!(instructions[0].data, vec![2, 144, 95, 1, 0]);
+        assert_eq!(instructions[1].data, vec![3, 208, 7, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            instructions[2].program_id,
+            solana_sdk_ids::ed25519_program::ID
+        );
+        assert_eq!(
+            instructions[3].program_id,
+            solana_sdk_ids::ed25519_program::ID
+        );
+        assert_eq!(instructions[4].program_id, spot_settlement::id());
     }
 }

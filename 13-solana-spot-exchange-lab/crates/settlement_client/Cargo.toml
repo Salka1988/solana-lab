@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anchor-lang.workspace = true
+solana-compute-budget-interface.workspace = true
 solana-ed25519-program.workspace = true
 solana-sdk-ids.workspace = true
 spot_settlement = { path = "../../programs/spot-settlement", features = ["no-entrypoint"] }

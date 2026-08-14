@@ -834,7 +834,7 @@ fn signed_settlement_builder_allows_prefix_instructions_before_signatures() {
 }
 
 #[test]
-fn signed_settlement_rejects_mismatched_ed25519_message() {
+fn signed_settlement_builder_allows_compute_budget_before_signatures() {
     let (mut svm, admin) = setup();
     let fixture = initialized_market(&mut svm, admin);
     seed_trade_balances(&mut svm, &fixture);
@@ -843,6 +843,31 @@ fn signed_settlement_rejects_mismatched_ed25519_message() {
         &fixture.seller,
         fixture.market.market_config,
         102,
+        SIGNED_FILL_QUANTITY,
+    );
+    let instructions = signed_fill_builder(&fixture)
+        .with_compute_budget(90_000, 2_000)
+        .build(signed_settlement_accounts(&fixture), args);
+
+    assert!(test_support::send_transaction(
+        &mut svm,
+        fixture.settlement_authority.pubkey(),
+        instructions,
+        &[&fixture.settlement_authority],
+    )
+    .is_ok());
+}
+
+#[test]
+fn signed_settlement_rejects_mismatched_ed25519_message() {
+    let (mut svm, admin) = setup();
+    let fixture = initialized_market(&mut svm, admin);
+    seed_trade_balances(&mut svm, &fixture);
+    let args = signed_fill_args(
+        &fixture.buyer,
+        &fixture.seller,
+        fixture.market.market_config,
+        103,
         SIGNED_FILL_QUANTITY,
     );
     let mut instructions = signed_fill_instructions(&fixture, args);
