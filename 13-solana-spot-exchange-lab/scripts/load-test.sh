@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SERVICE_URL="${SERVICE_URL:-http://127.0.0.1:3000}"
+API_KEY="${API_KEY:-${EXCHANGE_API_KEY:-}}"
 ITERATIONS="${ITERATIONS:-100}"
 COMMAND_OFFSET="${COMMAND_OFFSET:-1000000}"
 PRICE="${PRICE:-100}"
@@ -14,10 +15,15 @@ BASE_ASSET_ID="${BASE_ASSET_ID:-1}"
 post_json() {
   local path="$1"
   local body="$2"
+  local headers=(-H "content-type: application/json")
+
+  if [ -n "${API_KEY}" ]; then
+    headers+=(-H "x-api-key: ${API_KEY}")
+  fi
 
   curl -fsS \
     -X POST "${SERVICE_URL}${path}" \
-    -H "content-type: application/json" \
+    "${headers[@]}" \
     --data-raw "${body}" >/dev/null
 }
 

@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use axum::{
     body::Body,
     extract::{Extension, Path, State},
-    http::{HeaderValue, Request, StatusCode},
+    http::{HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -31,7 +31,9 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber};
 const MARKET_SOL_USDC: &str = "SOL-USDC";
 pub const EXCHANGE_BOOT_MODE_ENV: &str = "EXCHANGE_BOOT_MODE";
 pub const EXCHANGE_HTTP_ADDR_ENV: &str = "EXCHANGE_HTTP_ADDR";
+pub const EXCHANGE_API_KEY_ENV: &str = "EXCHANGE_API_KEY";
 pub const DATABASE_URL_ENV: &str = "DATABASE_URL";
+pub const X_API_KEY_HEADER: &str = "x-api-key";
 pub const X_REQUEST_ID_HEADER: &str = "x-request-id";
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -66,6 +68,7 @@ pub struct ServiceState {
     market: MarketSpec,
     actor: MarketActorHandle,
     metrics: ServiceMetrics,
+    api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -176,12 +179,24 @@ pub async fn app_from_env() -> Result<Router, StartupError> {
 pub async fn app_from_config(config: BootConfig) -> Result<Router, StartupError> {
     info!(boot_mode = ?config.mode, "building exchange service");
     match config.mode {
-        BootMode::Local => Ok(app()),
+        BootMode::Local => {
+            let market = default_market();
+            let actor = MarketActorHandle::spawn(market, 1024);
+            Ok(app_with_actor_and_api_key(
+                MARKET_SOL_USDC,
+                ReadyBootMode::Local,
+                JournalMode::Noop,
+                market,
+                actor,
+                config.api_key,
+            ))
+        }
         BootMode::Postgres => {
-            app_with_postgres(
+            app_with_postgres_and_api_key(
                 config.database_url.as_deref().ok_or_else(|| {
                     StartupError::Config(format!("{DATABASE_URL_ENV} is required"))
                 })?,
+                config.api_key,
             )
             .await
         }
@@ -189,12 +204,22 @@ pub async fn app_from_config(config: BootConfig) -> Result<Router, StartupError>
 }
 
 pub async fn app_with_postgres(database_url: &str) -> Result<Router, StartupError> {
-    info!("connecting postgres event journal");
-    let journal = PostgresEventJournal::connect(database_url).await?;
-    app_with_postgres_journal(journal).await
+    app_with_postgres_and_api_key(database_url, None).await
 }
 
-async fn app_with_postgres_journal(journal: PostgresEventJournal) -> Result<Router, StartupError> {
+async fn app_with_postgres_and_api_key(
+    database_url: &str,
+    api_key: Option<String>,
+) -> Result<Router, StartupError> {
+    info!("connecting postgres event journal");
+    let journal = PostgresEventJournal::connect(database_url).await?;
+    app_with_postgres_journal(journal, api_key).await
+}
+
+async fn app_with_postgres_journal(
+    journal: PostgresEventJournal,
+    api_key: Option<String>,
+) -> Result<Router, StartupError> {
     let market = default_market();
     info!("running postgres migrations");
     journal.migrate().await?;
@@ -205,12 +230,13 @@ async fn app_with_postgres_journal(journal: PostgresEventJournal) -> Result<Rout
     let actor =
         MarketActorHandle::spawn_from_app(exchange, 1024, PostgresRuntimeJournal::new(journal));
 
-    Ok(app_with_actor(
+    Ok(app_with_actor_and_api_key(
         MARKET_SOL_USDC,
         ReadyBootMode::Postgres,
         JournalMode::Postgres,
         market,
         actor,
+        api_key,
     ))
 }
 
@@ -220,6 +246,17 @@ pub fn app_with_actor(
     journal_mode: JournalMode,
     market: MarketSpec,
     actor: MarketActorHandle,
+) -> Router {
+    app_with_actor_and_api_key(market_id, boot_mode, journal_mode, market, actor, None)
+}
+
+pub fn app_with_actor_and_api_key(
+    market_id: impl Into<String>,
+    boot_mode: ReadyBootMode,
+    journal_mode: JournalMode,
+    market: MarketSpec,
+    actor: MarketActorHandle,
+    api_key: Option<String>,
 ) -> Router {
     let metrics = ServiceMetrics::default();
     Router::new()
@@ -242,6 +279,7 @@ pub fn app_with_actor(
             market,
             actor,
             metrics,
+            api_key,
         })
 }
 
@@ -279,6 +317,7 @@ pub fn http_addr_from_value(value: Option<&str>) -> Result<SocketAddr, StartupEr
 pub struct BootConfig {
     pub mode: BootMode,
     pub database_url: Option<String>,
+    pub api_key: Option<String>,
 }
 
 impl BootConfig {
@@ -286,15 +325,18 @@ impl BootConfig {
         Self::from_values(
             env::var(EXCHANGE_BOOT_MODE_ENV).ok().as_deref(),
             env::var(DATABASE_URL_ENV).ok().as_deref(),
+            env::var(EXCHANGE_API_KEY_ENV).ok().as_deref(),
         )
     }
 
     pub fn from_values(
         boot_mode: Option<&str>,
         database_url: Option<&str>,
+        api_key: Option<&str>,
     ) -> Result<Self, StartupError> {
         let mode = boot_mode.map_or(Ok(BootMode::Local), BootMode::parse)?;
         let database_url = database_url.map(str::to_owned);
+        let api_key = api_key.filter(|value| !value.is_empty()).map(str::to_owned);
 
         if mode == BootMode::Postgres && database_url.is_none() {
             return Err(StartupError::Config(format!(
@@ -302,7 +344,11 @@ impl BootConfig {
             )));
         }
 
-        Ok(Self { mode, database_url })
+        Ok(Self {
+            mode,
+            database_url,
+            api_key,
+        })
     }
 }
 
@@ -438,8 +484,10 @@ async fn prometheus_metrics_endpoint(State(state): State<ServiceState>) -> impl 
 async fn credit_deposit(
     State(state): State<ServiceState>,
     Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
     Json(request): Json<DepositRequest>,
 ) -> Result<Json<DepositResponse>, ApiError> {
+    authorize_api_key(&state, &headers).map_err(|error| record_api_error(error, &state.metrics))?;
     info!(
         request_id = %request_id.as_str(),
         command_id = request.command_id,
@@ -483,8 +531,10 @@ async fn credit_deposit(
 async fn place_order(
     State(state): State<ServiceState>,
     Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
     Json(request): Json<OrderRequest>,
 ) -> Result<Json<OrderResponse>, ApiError> {
+    authorize_api_key(&state, &headers).map_err(|error| record_api_error(error, &state.metrics))?;
     info!(
         request_id = %request_id.as_str(),
         command_id = request.command_id,
@@ -596,6 +646,20 @@ async fn snapshot(
 fn record_api_error(error: ApiError, metrics: &ServiceMetrics) -> ApiError {
     metrics.record_api_error();
     error
+}
+
+fn authorize_api_key(state: &ServiceState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(expected) = state.api_key.as_deref() else {
+        return Ok(());
+    };
+
+    match headers
+        .get(X_API_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(actual) if actual == expected => Ok(()),
+        _ => Err(ApiError::Unauthorized),
+    }
 }
 
 async fn actor_snapshot(
@@ -805,6 +869,7 @@ fn write_counter(output: &mut String, name: &str, help: &str, value: u64) {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiError {
+    Unauthorized,
     BadRequest(String),
     Conflict(String),
     Internal(&'static str),
@@ -843,6 +908,7 @@ impl From<application::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
+            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_owned()),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message.to_owned()),
@@ -925,10 +991,11 @@ mod tests {
     #[test]
     fn boot_config_defaults_to_local_without_database() {
         assert_eq!(
-            BootConfig::from_values(None, None).unwrap(),
+            BootConfig::from_values(None, None, None).unwrap(),
             BootConfig {
                 mode: BootMode::Local,
-                database_url: None
+                database_url: None,
+                api_key: None,
             }
         );
     }
@@ -936,10 +1003,11 @@ mod tests {
     #[test]
     fn boot_config_allows_explicit_local_without_database() {
         assert_eq!(
-            BootConfig::from_values(Some("local"), None).unwrap(),
+            BootConfig::from_values(Some("local"), None, Some("secret")).unwrap(),
             BootConfig {
                 mode: BootMode::Local,
-                database_url: None
+                database_url: None,
+                api_key: Some("secret".to_owned()),
             }
         );
     }
@@ -947,16 +1015,21 @@ mod tests {
     #[test]
     fn boot_config_requires_database_url_for_postgres() {
         assert!(matches!(
-            BootConfig::from_values(Some("postgres"), None),
+            BootConfig::from_values(Some("postgres"), None, None),
             Err(StartupError::Config(_))
         ));
 
         assert_eq!(
-            BootConfig::from_values(Some("postgres"), Some("postgres://localhost/exchange"))
-                .unwrap(),
+            BootConfig::from_values(
+                Some("postgres"),
+                Some("postgres://localhost/exchange"),
+                None
+            )
+            .unwrap(),
             BootConfig {
                 mode: BootMode::Postgres,
-                database_url: Some("postgres://localhost/exchange".to_owned())
+                database_url: Some("postgres://localhost/exchange".to_owned()),
+                api_key: None,
             }
         );
     }
@@ -964,7 +1037,7 @@ mod tests {
     #[test]
     fn boot_config_rejects_unknown_mode() {
         assert!(matches!(
-            BootConfig::from_values(Some("memory"), None),
+            BootConfig::from_values(Some("memory"), None, None),
             Err(StartupError::Config(_))
         ));
     }
@@ -994,6 +1067,7 @@ mod tests {
         let service = app_from_config(BootConfig {
             mode: BootMode::Local,
             database_url: None,
+            api_key: None,
         })
         .await
         .unwrap();
@@ -1020,6 +1094,78 @@ mod tests {
                 "event_count": 0
             })
         );
+    }
+
+    #[tokio::test]
+    async fn protected_deposit_rejects_missing_api_key() {
+        let service = app_from_config(BootConfig {
+            mode: BootMode::Local,
+            database_url: None,
+            api_key: Some("secret".to_owned()),
+        })
+        .await
+        .unwrap();
+
+        let response = service
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/deposits")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "command_id": 1,
+                            "trader_id": 1,
+                            "asset_id": 1,
+                            "amount": 7
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response_json(response).await,
+            json!({"error": "unauthorized"})
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_deposit_accepts_matching_api_key() {
+        let service = app_from_config(BootConfig {
+            mode: BootMode::Local,
+            database_url: None,
+            api_key: Some("secret".to_owned()),
+        })
+        .await
+        .unwrap();
+
+        let response = service
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/deposits")
+                    .header("content-type", "application/json")
+                    .header(X_API_KEY_HEADER, "secret")
+                    .body(Body::from(
+                        json!({
+                            "command_id": 1,
+                            "trader_id": 1,
+                            "asset_id": 1,
+                            "amount": 7
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, json!({"accepted": true}));
     }
 
     #[tokio::test]
@@ -1444,7 +1590,7 @@ mod tests {
     #[ignore = "requires DATABASE_URL"]
     async fn app_with_postgres_replays_events_after_restart(pool: sqlx::PgPool) {
         let first_service =
-            app_with_postgres_journal(PostgresEventJournal::from_pool(pool.clone()))
+            app_with_postgres_journal(PostgresEventJournal::from_pool(pool.clone()), None)
                 .await
                 .unwrap();
 
@@ -1470,7 +1616,7 @@ mod tests {
         assert_eq!(deposit.status(), StatusCode::OK);
 
         let second_service =
-            app_with_postgres_journal(PostgresEventJournal::from_pool(pool.clone()))
+            app_with_postgres_journal(PostgresEventJournal::from_pool(pool.clone()), None)
                 .await
                 .unwrap();
 

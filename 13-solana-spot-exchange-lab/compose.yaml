@@ -6,6 +6,7 @@ services:
     environment:
       EXCHANGE_HTTP_ADDR: 0.0.0.0:3000
       EXCHANGE_BOOT_MODE: postgres
+      EXCHANGE_API_KEY: ${EXCHANGE_API_KEY:-}
       DATABASE_URL: postgres://exchange:exchange@postgres:5432/exchange
       RUST_LOG: info
     ports:
